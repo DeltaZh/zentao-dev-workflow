@@ -35,9 +35,9 @@
 - Create: `scripts/zentao.py`
 - Create: `config.example.json`
 
-- [ ] 实现配置读写、Token 缓存、HTTP JSON
-- [ ] 实现 `auth` / `list-products` / `list-projects` / `list-executions` / `bind-repo` / `show-repo`
-- [ ] 本地 `--help` 与无配置时的错误路径冒烟
+- [x] 实现配置读写、Token 缓存、HTTP JSON
+- [x] 实现 `auth` / `list-products` / `list-projects` / `list-executions` / `bind-repo` / `show-repo`
+- [x] 本地 `--help` 与无配置时的错误路径冒烟
 
 ---
 
@@ -46,8 +46,8 @@
 **Files:**
 - Modify: `scripts/zentao.py`
 
-- [ ] 实现 `create-story` / `create-tasks` / `update-status` / `link-story-execution`
-- [ ] stdout 统一 JSON；错误走 stderr 非零退出
+- [x] 实现 `create-story` / `create-tasks` / `update-status` / `link-story-execution`
+- [x] stdout 统一 JSON；错误走 stderr 非零退出
 
 ---
 
@@ -58,11 +58,11 @@
 - Create: `reference.md`
 - Create: `README.md`
 
-- [ ] 写触发条件、开工/收工流程、确认门禁、命令表
-- [ ] reference 记录 API 字段与状态映射
+- [x] 写触发条件、开工/收工流程、确认门禁、命令表
+- [x] reference 记录 API 字段与状态映射
 
 ---
 
 ### Task 5: 提交实现
 
-- [ ] 本地 git 提交实现（不含真实凭证）
+- [x] 本地 git 提交实现（不含真实凭证）
