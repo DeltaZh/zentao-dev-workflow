@@ -15,6 +15,11 @@ description: 通过禅道 REST API 新建产品/项目、为当前改动创建�
 - 配置：`~/.config/zentao/config.json`（模板见 `$SKILL/config.example.json`）
 - 字段与 API 细节：[reference.md](reference.md)
 
+## 站立约定（默认，用户未特别说明时）
+
+1. **人员一律当前登录用户**：需求/任务的负责人、指派给、开发（以及激活评审人 `reviewer`）默认都用配置里的 `account`（即 CLI 当前登录账号）。**禁止**擅自指派给他人；仅当用户当次明确指定别人时才改。
+2. **项目/执行状态由用户管**：用户在禅道 UI 里改的项目状态（如「已开始」）以用户为准；Agent **不要**主动改项目/迭代的 `status`（`wait`/`doing`/`closed` 等），除非用户当次要求。
+
 ## 前置检查
 
 1. 若配置不存在：指导用户复制 `config.example.json` → `~/.config/zentao/config.json`，填 `baseUrl` / `account` / `password`，权限建议 `chmod 600`
@@ -89,7 +94,7 @@ python3 "$SKILL/scripts/zentao.py" create-story --payload /tmp/zentao-story.json
 
 1. 定位需求：用户指定 ID → 绑定里的 `lastStoryId` → 再询问  
 2. 确定执行：绑定值 / 用户指定 / `list-executions` 选择  
-3. 结合 git diff / 会话拆 1～N 条开发任务；`type` 默认 `devel`；`assignedTo` 默认配置账号  
+3. 结合 git diff / 会话拆 1～N 条开发任务；`type` 默认 `devel`；`assignedTo` / 开发人 **必须** 默认配置 `account`（见上方站立约定）  
 4. **工时**：按熟悉代码库 + AI 辅助的偏高效率估算（明显短于纯人工；单任务常见 0.5～4h；用户给定工时时以用户为准）  
 5. 展示整包摘要，等待确认  
 6. 依次执行（每步用 CLI；关联失败见命令输出 `skipped` 时可说明并继续）：

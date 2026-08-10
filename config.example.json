@@ -5,7 +5,9 @@
   "defaults": {
     "hourBias": "high_efficiency",
     "storyCategory": "feature",
-    "confirmBeforeWrite": true
+    "confirmBeforeWrite": true,
+    "assignToSelf": true,
+    "doNotChangeProjectStatus": true
   },
   "statusMap": {
     "storyAfterCreate": "active",
