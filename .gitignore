@@ -2,6 +2,12 @@ __pycache__/
 *.pyc
 .DS_Store
 .env
+.env.*
 *.local.json
+config.json
+config.local.json
+token-cache.json
 payload*.json
 /tmp/
+.idea/
+.vscode/
