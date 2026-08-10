@@ -1,0 +1,17 @@
+{
+  "baseUrl": "https://zentao.example.com",
+  "account": "your_account",
+  "password": "your_password",
+  "defaults": {
+    "hourBias": "high_efficiency",
+    "storyCategory": "feature",
+    "confirmBeforeWrite": true
+  },
+  "statusMap": {
+    "storyAfterCreate": "active",
+    "taskAfterFinish": "done",
+    "storyAfterFinishPartial": "developing",
+    "storyAfterFinishAll": "developed"
+  },
+  "repos": {}
+}
