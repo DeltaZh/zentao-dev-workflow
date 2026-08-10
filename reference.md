@@ -19,13 +19,47 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 | 用途 | 方法 | 路径 |
 |------|------|------|
 | 获取 Token | POST | `/api.php/v1/tokens` |
+| 项目集列表 | GET | `/api.php/v1/programs` |
 | 产品列表 | GET | `/api.php/v1/products` |
+| 创建产品 | POST | `/api.php/v1/products` |
 | 项目列表 | GET | `/api.php/v1/projects` |
+| 创建项目 | POST | `/api.php/v1/projects` |
 | 执行列表 | GET | `/api.php/v1/projects/{id}/executions` |
 | 创建需求 | POST | `/api.php/v1/stories` |
 | 创建任务 | POST | `/api.php/v1/executions/{id}/tasks` |
 | 更新需求 | PUT | `/api.php/v1/stories/{id}` |
 | 更新任务 | PUT | `/api.php/v1/tasks/{id}` |
+
+## 创建产品 payload 示例
+
+```json
+{
+  "name": "我的新产品",
+  "code": "myProduct",
+  "program": 6,
+  "type": "normal",
+  "acl": "open",
+  "desc": "可选描述"
+}
+```
+
+`program` 为所属项目集 id（先 `list-programs`）。未传 `code` 时 CLI 会尝试从名称生成。
+
+## 创建项目 payload 示例
+
+```json
+{
+  "name": "我的新项目",
+  "code": "myProject",
+  "products": [12],
+  "begin": "2026-08-10",
+  "end": "2026-11-08",
+  "model": "scrum",
+  "parent": 0
+}
+```
+
+`products` 必填且非空。未传 `begin`/`end` 时默认今天～+90 天；`model` 默认 `scrum`。
 
 ## 创建需求 payload 示例
 
@@ -85,6 +119,8 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 
 ## 链接（启发式）
 
+- 产品：`{baseUrl}/product-view-{id}.html`
+- 项目：`{baseUrl}/project-view-{id}.html`
 - 需求：`{baseUrl}/story-view-{id}.html`
 - 任务：`{baseUrl}/task-view-{id}.html`
 

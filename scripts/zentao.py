@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import ssl
 import sys
 import urllib.error
@@ -111,7 +112,11 @@ def api_request(
         headers["Token"] = token
 
     req = urllib.request.Request(url, data=data, headers=headers, method=method.upper())
-    context = ssl.create_default_context()
+    # 公司禅道常见自签证书：配置 verifySsl=false 时可关闭校验
+    if cfg.get("verifySsl", True) is False:
+        context = ssl._create_unverified_context()
+    else:
+        context = ssl.create_default_context()
     try:
         with urllib.request.urlopen(req, timeout=60, context=context) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
@@ -251,6 +256,34 @@ def cmd_auth(_: argparse.Namespace) -> None:
     emit({"ok": True, "baseUrl": cfg["baseUrl"], "account": cfg["account"], "tokenPrefix": token[:6] + "..."})
 
 
+def suggest_code(name: str, prefix: str = "item") -> str:
+    ascii_part = re.sub(r"[^a-zA-Z0-9]+", "", name or "")
+    if ascii_part:
+        return ascii_part[:30]
+    return f"{prefix}{int(datetime.now().timestamp())}"
+
+
+def product_url(cfg: dict[str, Any], product_id: int) -> str:
+    return f"{cfg['baseUrl']}/product-view-{product_id}.html"
+
+
+def project_url(cfg: dict[str, Any], project_id: int) -> str:
+    return f"{cfg['baseUrl']}/project-view-{project_id}.html"
+
+
+def cmd_list_programs(_: argparse.Namespace) -> None:
+    cfg = load_config()
+    payload = request_with_auth(cfg, "GET", "/api.php/v1/programs", query={"limit": 1000, "page": 1})
+    items = normalize_list(payload, ("programs", "data"))
+    emit(
+        {
+            "ok": True,
+            "count": len(items),
+            "programs": [pick_fields(i, ("id", "name", "status", "parent", "begin", "end")) for i in items],
+        }
+    )
+
+
 def cmd_list_products(_: argparse.Namespace) -> None:
     cfg = load_config()
     payload = request_with_auth(cfg, "GET", "/api.php/v1/products", query={"limit": 1000, "page": 1})
@@ -384,6 +417,80 @@ def story_url(cfg: dict[str, Any], story_id: int) -> str:
 
 def task_url(cfg: dict[str, Any], task_id: int) -> str:
     return f"{cfg['baseUrl']}/task-view-{task_id}.html"
+
+
+def cmd_create_product(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    payload = read_payload(args.payload)
+    if not payload.get("name"):
+        die("payload 缺少必填字段: name")
+    if payload.get("program") is None:
+        die("payload 缺少必填字段: program（所属项目集 id；可先 list-programs）")
+    payload.setdefault("code", suggest_code(str(payload["name"]), "product"))
+    payload.setdefault("type", "normal")
+    payload.setdefault("acl", "open")
+    payload["program"] = int(payload["program"])
+
+    result = request_with_auth(cfg, "POST", "/api.php/v1/products", body=payload)
+    product_id = result.get("id") if isinstance(result, dict) else None
+    if product_id is None and isinstance(result, dict):
+        # 少数实例可能把新建结果包在 products 里
+        products = normalize_list(result, ("products", "data"))
+        if products:
+            product_id = products[-1].get("id")
+    if product_id is None:
+        raise ZenTaoError(f"创建产品未返回 id: {result}")
+
+    emit(
+        {
+            "ok": True,
+            "productId": int(product_id),
+            "name": payload.get("name"),
+            "code": payload.get("code"),
+            "program": payload.get("program"),
+            "url": product_url(cfg, int(product_id)),
+            "raw": result,
+        }
+    )
+
+
+def cmd_create_project(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    payload = read_payload(args.payload)
+    for key in ("name", "products"):
+        if key not in payload:
+            die(f"payload 缺少必填字段: {key}")
+    products = payload["products"]
+    if not isinstance(products, list) or not products:
+        die("payload.products 必须是非空数组，例如 [12]")
+    payload["products"] = [int(x) for x in products]
+    payload.setdefault("code", suggest_code(str(payload["name"]), "project"))
+    payload.setdefault("model", "scrum")
+    payload.setdefault("parent", 0)
+    if not payload.get("begin") or not payload.get("end"):
+        start = date.today()
+        end = start + timedelta(days=90)
+        payload.setdefault("begin", start.isoformat())
+        payload.setdefault("end", end.isoformat())
+
+    result = request_with_auth(cfg, "POST", "/api.php/v1/projects", body=payload)
+    project_id = result.get("id") if isinstance(result, dict) else None
+    if project_id is None:
+        raise ZenTaoError(f"创建项目未返回 id: {result}")
+
+    emit(
+        {
+            "ok": True,
+            "projectId": int(project_id),
+            "name": payload.get("name"),
+            "code": payload.get("code"),
+            "products": payload.get("products"),
+            "begin": payload.get("begin"),
+            "end": payload.get("end"),
+            "url": project_url(cfg, int(project_id)),
+            "raw": result,
+        }
+    )
 
 
 def cmd_create_story(args: argparse.Namespace) -> None:
@@ -562,6 +669,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("auth", help="获取/刷新 Token")
     p.set_defaults(func=cmd_auth)
 
+    p = sub.add_parser("list-programs", help="列出项目集（创建产品前选用）")
+    p.set_defaults(func=cmd_list_programs)
+
     p = sub.add_parser("list-products", help="列出产品")
     p.set_defaults(func=cmd_list_products)
 
@@ -583,6 +693,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--project", type=int, required=True)
     p.add_argument("--execution", type=int, default=None)
     p.set_defaults(func=cmd_bind_repo)
+
+    p = sub.add_parser("create-product", help="创建产品")
+    p.add_argument("--payload", required=True, help="JSON 文件路径")
+    p.set_defaults(func=cmd_create_product)
+
+    p = sub.add_parser("create-project", help="创建项目（需关联已有产品）")
+    p.add_argument("--payload", required=True, help="JSON 文件路径")
+    p.set_defaults(func=cmd_create_project)
 
     p = sub.add_parser("create-story", help="创建需求")
     p.add_argument("--payload", required=True, help="JSON 文件路径")
