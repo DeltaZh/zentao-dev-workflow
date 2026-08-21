@@ -11,9 +11,11 @@ Cursor Agent Skill：把当前改动同步到禅道（ZenTao）——支持新�
 | 仓库绑定 | 首次使用时拉取产品/项目列表供选择，写入本机配置 |
 | 新建产品 | 先选项目集，再创建产品 |
 | 新建项目 | 关联已有产品后创建项目 |
-| 开工建需求 | 根据对话/改动起草需求并创建 |
-| 收工补任务 | 关联迭代、拆任务、填预计工时、推进状态 |
+| 开工建需求 | 创建需求并评审激活（未激活不进入开发） |
+| 收工补任务 | **建迭代 → 关联需求 → 建任务 → 完成任务**（顺序固定） |
 | 确认门禁 | 创建/改状态前必须用户确认 |
+
+> 顺序打乱或评审后改需求正文，状态常变为「需求变更」，需重新评审。
 
 ## 环境要求
 
@@ -122,8 +124,10 @@ python3 ~/.cursor/skills/zentao-dev-workflow/scripts/zentao.py list-products
 典型流程：
 
 1. **首次绑定**：Agent 列出产品 → 你选择（或新建）→ 再列项目 → 选择（或新建）→ 写入本机 `repos`
-2. **开工**：Agent 起草需求摘要 → 你确认 → 调用接口创建 → 返回需求 ID/链接
-3. **收工**：Agent 起草任务拆分与偏高效率工时 → 你确认 → 创建任务并尝试更新状态
+2. **开工**：起草需求 → 你确认 → 创建 → **评审激活** → 返回需求 ID/链接与状态
+3. **收工**：确认需求已激活 → 建/选迭代 → 关联需求 → 拆任务与工时 → 你确认 → 建任务并完成
+
+强制顺序：`建需求 → 评审 → 建迭代 → 关联 → 建任务 → 完成`。乱序会导致需求变成变更态。
 
 ### 工时原则
 
@@ -144,6 +148,9 @@ python3 scripts/zentao.py bind-repo --cwd "<workspace>" --product <id> --project
 python3 scripts/zentao.py create-product --payload <file.json>
 python3 scripts/zentao.py create-project --payload <file.json>
 python3 scripts/zentao.py create-story --payload <file.json> [--cwd "<workspace>"]
+python3 scripts/zentao.py get-story --id <id>
+python3 scripts/zentao.py review-story --id <id>
+python3 scripts/zentao.py create-execution --payload <file.json> [--cwd "<workspace>"]
 python3 scripts/zentao.py create-tasks --payload <file.json>
 python3 scripts/zentao.py update-status --type story|task --id <id> --status <name> [--stage <stage>]
 python3 scripts/zentao.py link-story-execution --story <id> --execution <id>

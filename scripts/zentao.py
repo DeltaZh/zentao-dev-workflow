@@ -493,12 +493,167 @@ def cmd_create_project(args: argparse.Namespace) -> None:
     )
 
 
+def execution_url(cfg: dict[str, Any], execution_id: int) -> str:
+    return f"{cfg['baseUrl']}/execution-view-{execution_id}.html"
+
+
+def cmd_get_story(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    story_id = int(args.id)
+    result = request_with_auth(cfg, "GET", f"/api.php/v1/stories/{story_id}")
+    story = result if isinstance(result, dict) else {}
+    if isinstance(result, dict) and isinstance(result.get("story"), dict):
+        story = result["story"]
+    status = story.get("status")
+    stage = story.get("stage")
+    emit(
+        {
+            "ok": True,
+            "storyId": story_id,
+            "status": status,
+            "stage": stage,
+            "title": story.get("title"),
+            "needsReview": status in ("draft", "changing", "changed", "reviewing", None),
+            "readyForExecution": status == "active",
+            "url": story_url(cfg, story_id),
+            "raw": result,
+        }
+    )
+
+
+def cmd_review_story(args: argparse.Namespace) -> None:
+    """尽力将需求评审为激活。官方 REST 对评审支持不稳定，多路径尝试。"""
+    cfg = load_config()
+    story_id = int(args.id)
+    account = cfg.get("account")
+    assigned = args.assigned_to or account
+    comment = args.comment or "Cursor Skill 评审通过"
+    body_activate = {"assignedTo": assigned, "comment": comment}
+    body_review = {
+        "result": "pass",
+        "assignedTo": assigned,
+        "reviewedBy": assigned,
+        "comment": comment,
+        "reviewer": [assigned] if assigned else [],
+    }
+    attempts = [
+        ("PUT", f"/api.php/v1/stories/{story_id}/activate", body_activate),
+        ("PUT", f"/api.php/v2/stories/{story_id}/activate", body_activate),
+        ("POST", f"/api.php/v1/stories/{story_id}/activate", body_activate),
+        ("POST", f"/api.php/v2/stories/{story_id}/activate", body_activate),
+        ("PUT", f"/api.php/v1/stories/{story_id}/review", body_review),
+        ("POST", f"/api.php/v1/stories/{story_id}/review", body_review),
+        ("PUT", f"/api.php/v1/stories/{story_id}", {"status": "active", "assignedTo": assigned}),
+    ]
+    errors = []
+    for method, path, body in attempts:
+        try:
+            result = request_with_auth(cfg, method, path, body=body)
+            # 再读一次确认状态
+            check = None
+            try:
+                check = request_with_auth(cfg, "GET", f"/api.php/v1/stories/{story_id}")
+            except ZenTaoError:
+                check = None
+            status = None
+            if isinstance(check, dict):
+                status = check.get("status")
+                if isinstance(check.get("story"), dict):
+                    status = check["story"].get("status", status)
+            emit(
+                {
+                    "ok": True,
+                    "storyId": story_id,
+                    "method": method,
+                    "path": path,
+                    "status": status,
+                    "readyForExecution": status == "active",
+                    "url": story_url(cfg, story_id),
+                    "raw": result,
+                    "check": check,
+                    "note": None
+                    if status == "active"
+                    else "接口已调用，但状态可能仍非 active；请在禅道 UI 确认评审结果后再继续建迭代/任务",
+                }
+            )
+            return
+        except ZenTaoError as exc:
+            errors.append({"method": method, "path": path, "error": str(exc)})
+    emit(
+        {
+            "ok": False,
+            "storyId": story_id,
+            "message": "自动评审/激活失败。请在禅道 UI 用评审人账号完成「评审通过」后，再继续建迭代与任务。",
+            "errors": errors,
+            "url": story_url(cfg, story_id),
+        }
+    )
+    raise SystemExit(4)
+
+
+def cmd_create_execution(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    payload = read_payload(args.payload)
+    project_id = payload.get("project") or payload.get("projectId")
+    if project_id is None:
+        die("payload 需要 project（所属项目 id）")
+    if not payload.get("name"):
+        die("payload 缺少必填字段: name")
+    payload["project"] = int(project_id)
+    payload.setdefault("code", suggest_code(str(payload["name"]), "sprint"))
+    account = cfg.get("account")
+    if account:
+        payload.setdefault("PM", account)
+        payload.setdefault("teamMembers", [account])
+    if not payload.get("begin") or not payload.get("end"):
+        start = date.today()
+        end = start + timedelta(days=14)
+        payload.setdefault("begin", start.isoformat())
+        payload.setdefault("end", end.isoformat())
+
+    result = request_with_auth(
+        cfg,
+        "POST",
+        f"/api.php/v1/projects/{int(project_id)}/executions",
+        body=payload,
+    )
+    execution_id = result.get("id") if isinstance(result, dict) else None
+    if execution_id is None:
+        raise ZenTaoError(f"创建执行未返回 id: {result}")
+
+    cwd = resolve_cwd(args.cwd) if args.cwd else None
+    if cwd and cwd in cfg.get("repos", {}):
+        cfg["repos"][cwd]["executionId"] = int(execution_id)
+        cfg["repos"][cwd]["executionName"] = payload.get("name")
+        save_config(cfg)
+
+    emit(
+        {
+            "ok": True,
+            "executionId": int(execution_id),
+            "projectId": int(project_id),
+            "name": payload.get("name"),
+            "code": payload.get("code"),
+            "url": execution_url(cfg, int(execution_id)),
+            "raw": result,
+            "updatedRepo": cwd,
+        }
+    )
+
+
 def cmd_create_story(args: argparse.Namespace) -> None:
     cfg = load_config()
     payload = read_payload(args.payload)
     for key in ("title", "product", "pri", "category"):
         if key not in payload:
             die(f"payload 缺少必填字段: {key}")
+
+    account = cfg.get("account")
+    if account:
+        payload.setdefault("assignedTo", account)
+        # 开启评审时需要 reviewer；默认本人
+        if "reviewer" not in payload:
+            payload["reviewer"] = [account]
 
     result = request_with_auth(cfg, "POST", "/api.php/v1/stories", body=payload)
     story_id = None
@@ -519,6 +674,7 @@ def cmd_create_story(args: argparse.Namespace) -> None:
             "url": story_url(cfg, int(story_id)),
             "raw": result,
             "updatedRepo": cwd,
+            "next": "必须先评审/激活需求（review-story），再创建迭代、关联、建任务",
         }
     )
 
@@ -706,6 +862,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--payload", required=True, help="JSON 文件路径")
     p.add_argument("--cwd", default=None, help="若提供且已绑定，则更新 lastStoryId")
     p.set_defaults(func=cmd_create_story)
+
+    p = sub.add_parser("get-story", help="查看需求状态（是否已激活、是否需重新评审）")
+    p.add_argument("--id", required=True)
+    p.set_defaults(func=cmd_get_story)
+
+    p = sub.add_parser("review-story", help="评审/激活需求（多路径尝试；失败则需 UI 评审）")
+    p.add_argument("--id", required=True)
+    p.add_argument("--assigned-to", default=None, help="指派给，默认配置 account")
+    p.add_argument("--comment", default=None)
+    p.set_defaults(func=cmd_review_story)
+
+    p = sub.add_parser("create-execution", help="在项目下创建执行/迭代")
+    p.add_argument("--payload", required=True)
+    p.add_argument("--cwd", default=None, help="若提供且已绑定，则更新 executionId")
+    p.set_defaults(func=cmd_create_execution)
 
     p = sub.add_parser("create-tasks", help="在执行下批量创建任务")
     p.add_argument("--payload", required=True)

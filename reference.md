@@ -25,10 +25,36 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 | 项目列表 | GET | `/api.php/v1/projects` |
 | 创建项目 | POST | `/api.php/v1/projects` |
 | 执行列表 | GET | `/api.php/v1/projects/{id}/executions` |
+| 创建执行 | POST | `/api.php/v1/projects/{id}/executions` |
 | 创建需求 | POST | `/api.php/v1/stories` |
+| 获取需求 | GET | `/api.php/v1/stories/{id}` |
+| 激活需求 | PUT/POST | `/api.php/v1|v2/stories/{id}/activate`（实例差异大） |
+| 关联需求到执行 | POST | `/api.php/v1/executions/{id}/stories` 等（多路径尝试） |
 | 创建任务 | POST | `/api.php/v1/executions/{id}/tasks` |
 | 更新需求 | PUT | `/api.php/v1/stories/{id}` |
 | 更新任务 | PUT | `/api.php/v1/tasks/{id}` |
+
+## 强制生命周期顺序
+
+1. 建需求 → 2. 评审激活 → 3. 建迭代 → 4. 关联需求 → 5. 建任务 → 6. 完成任务  
+
+评审后若再改需求正文，状态常变为 `changed`，必须重新评审。`review-story` 在部分禅道版本可能失败，需 UI 人工评审后用 `get-story` 确认 `status=active`。
+
+## 创建执行 payload 示例
+
+```json
+{
+  "project": 34,
+  "name": "迭代-导出功能",
+  "code": "sprintExport",
+  "begin": "2026-08-10",
+  "end": "2026-08-24",
+  "PM": "your_account",
+  "teamMembers": ["your_account"]
+}
+```
+
+未传 `begin`/`end` 时默认今天～+14 天。
 
 ## 创建产品 payload 示例
 
@@ -78,8 +104,10 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 
 `category` 常见值：`feature` | `interface` | `performance` | `safe` | `experience` | `improve` | `other`
 
-`status` 常见值：`draft` | `active` | `closed` | `changed`  
+`status` 常见值：`draft` | `active` | `closed` | `changed` | `reviewing`  
 `stage` 常见值：`wait` | `planned` | `projected` | `developing` | `developed` | `testing` | `tested` | `verified` | `released` | `closed`
+
+创建需求时 CLI 默认补 `assignedTo` / `reviewer` 为配置账号。创建后务必先评审激活，再关联迭代与建任务。
 
 ## 创建任务 payload 示例
 
@@ -110,10 +138,10 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 
 | 键 | 含义 | 默认建议 |
 |----|------|----------|
-| `storyAfterCreate` | 建需求后 | `active` |
+| `storyAfterCreate` | 建需求后目标（通常需评审才能真正达到） | `active` |
 | `taskAfterFinish` | 收工任务 | `done` |
-| `storyAfterFinishPartial` | 仍有未完成工作 | 需求 `stage=developing` |
-| `storyAfterFinishAll` | 本需求开发完成 | 需求 `stage=developed` |
+| `storyAfterFinishPartial` | 仍有未完成工作 | 需求 `stage=developing`（保持 status=active） |
+| `storyAfterFinishAll` | 本需求开发完成 | 需求 `stage=developed`（保持 status=active） |
 
 若公司实例枚举不同，以接口报错为准，校准后写回配置。
 
