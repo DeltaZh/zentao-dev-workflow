@@ -2,7 +2,7 @@
   "baseUrl": "https://zentao.example.com",
   "account": "your_account",
   "password": "your_password",
-    "defaults": {
+  "defaults": {
     "storyCategory": "feature",
     "confirmBeforeWrite": true,
     "doNotChangeProjectStatus": true
@@ -16,7 +16,11 @@
     "requirePreview": true,
     "previewSurface": "canvas",
     "repoLock": "session_git_root",
-    "assignToSelf": true
+    "assignToSelf": true,
+    "serverUtcOffsetHours": 8,
+    "writeIntervalSeconds": 0.35,
+    "authRetries": 2,
+    "authBackoffSeconds": 0.5
   },
   "statusMap": {
     "storyAfterCreate": "active",

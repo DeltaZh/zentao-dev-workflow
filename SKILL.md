@@ -192,7 +192,7 @@ python3 "$SKILL/scripts/zentao.py" link-story-execution --story <id> --execution
 # 建任务
 python3 "$SKILL/scripts/zentao.py" create-tasks --payload /tmp/zentao-tasks.json --cwd "<git 根目录>"
 
-# 完成自己的任务（不要改需求正文，不要改别人的任务）
+# 完成自己的任务：doing/done 走 start、finish，不 PUT 实际时间
 python3 "$SKILL/scripts/zentao.py" update-status --type task --id <id> --status done --cwd "<git 根目录>"
 ```
 
@@ -261,6 +261,9 @@ stdout 为 JSON；错误在 stderr，非零退出。
 - `--cwd` 不是 git 根目录：使用 stderr 里的 `gitRoot` 问用户，不要改到另一个仓库
 - 仓库未绑定，或绑定路径不是 git 根目录：先绑定或请用户重新绑定，不要自动改配置
 - `openedBy` 不是当前账号，或创建人解析不出：跳过该任务，不要改派后再写
+- 任务实际开始/完成时间不要用 PUT。`doing` 走 `POST /tasks/{id}/start`，`done` 先 start 再 `POST /tasks/{id}/finish`。时间是无时区的服务器本地时间 `YYYY-MM-DDTHH:MM:SS`，不要带 `Z`。时区用 `policy.serverUtcOffsetHours`，默认 8
+- 迭代的 `days` / `status` 可以 PUT。`realBegan` / `realEnd` 会被静默忽略，不要当成写成功。关闭时 `closedDate` 由服务器时钟填写，可能和本机差一天
+- 响应不是 JSON（常见是登录页 HTML 且 HTTP 200）或 502：清 token 再取，按 `authBackoffSeconds` 退避重试，次数见 `authRetries`。批量写任务之间停 `writeIntervalSeconds`（默认 0.35 秒）
 - 批量建任务部分失败：只报告已成功的 id，只重试失败项；内容有变化则重新预览
 
 ## 非目标

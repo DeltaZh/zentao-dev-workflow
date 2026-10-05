@@ -140,7 +140,7 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 
 ## policy
 
-本机 `~/.config/zentao/config.json` 的 `policy` 可覆盖默认口径。缺字段时 CLI 用技能默认补上，`show-policy` 的 `defaultsUsed` 标出来源。`defaults.hourBias` 与 `defaults.assignToSelf` 不再生效。
+本机 `~/.config/zentao/config.json` 的 `policy` 可覆盖默认口径。缺字段时 CLI 用技能默认补上，`show-policy` 的 `defaultsUsed` 标出来源。`defaults.hourBias` 与 `defaults.assignToSelf` 不再生效。`inspect-repo --cwd` 返回 git 根目录、`origin`、分支，以及绑定路径是不是 git 根目录。
 
 | 键 | 默认 |
 |---|---|
@@ -153,8 +153,17 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 | `previewSurface` | `canvas` |
 | `repoLock` | `session_git_root` |
 | `assignToSelf` | `true` |
+| `serverUtcOffsetHours` | `8` |
+| `writeIntervalSeconds` | `0.35` |
+| `authRetries` | `2` |
+| `authBackoffSeconds` | `0.5` |
 
-相关命令：`show-policy`、`inspect-repo --cwd`、`list-tasks --execution`。`inspect-repo` 返回 git 根目录、`origin`、分支，以及绑定路径是不是 git 根目录。无 `origin` 时 `message` 会说明确认路径前不要写入。
+## 接口坑
+
+- 任务的实际开始、完成时间用 PUT `/tasks/{id}` 会静默忽略：不报错，值也不变。`update-status` 在 `doing` 时改走 `POST /tasks/{id}/start`，在 `done` 时先 start 再 `POST /tasks/{id}/finish`。
+- 这两个动作接口把无时区字符串按服务器本地时间解释，再存成 UTC。`2026-10-05T09:30:00` 在东八区服务器上存成 `2026-10-05T01:30:00Z`。带 `Z` 会被再减 8 小时。CLI 按 `serverUtcOffsetHours` 生成无时区时间。
+- 迭代的 `days`、`status` 可以 PUT。`realBegan`、`realEnd` 同样会被静默忽略；关闭时服务端用自己的时钟写 `closedDate`，可能和本机差一天。创建迭代时若 payload 带了这两个字段，CLI 会丢掉并在结果里给出 `ignoredFields`。
+- token 过期时常见表现是登录页 HTML 且 HTTP 200，不是 401。CLI 遇到非 JSON、401、502、503、504 会清 token、重新登录，并按 `authBackoffSeconds` 退避重试。批量创建任务时，相邻写入间隔 `writeIntervalSeconds`。
 
 ## 状态映射（配置 statusMap）
 

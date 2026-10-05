@@ -10,6 +10,7 @@ import re
 import ssl
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -27,10 +28,18 @@ TOKEN_CACHE_PATH = Path(
 
 
 class ZenTaoError(Exception):
-    def __init__(self, message: str, *, status: int | None = None, body: Any = None):
+    def __init__(
+        self,
+        message: str,
+        *,
+        status: int | None = None,
+        body: Any = None,
+        not_json: bool = False,
+    ):
         super().__init__(message)
         self.status = status
         self.body = body
+        self.not_json = not_json
 
 
 def emit(data: Any) -> None:
@@ -131,7 +140,12 @@ def api_request(
             try:
                 return json.loads(raw)
             except json.JSONDecodeError as exc:
-                raise ZenTaoError(f"响应不是 JSON: {raw[:300]}", status=resp.status, body=raw) from exc
+                raise ZenTaoError(
+                    f"响应不是 JSON: {raw[:300]}",
+                    status=resp.status,
+                    body=raw,
+                    not_json=True,
+                ) from exc
     except urllib.error.HTTPError as exc:
         raw = exc.read().decode("utf-8", errors="replace")
         parsed: Any
@@ -181,15 +195,27 @@ def request_with_auth(
     body: Any = None,
     query: dict[str, Any] | None = None,
 ) -> Any:
-    token = fetch_token(cfg)
-    try:
-        return api_request(cfg, method, path, token=token, body=body, query=query)
-    except ZenTaoError as exc:
-        if exc.status == 401:
+    policy = load_policy(cfg)
+    retries = int(policy.get("authRetries") or 0)
+    backoff = float(policy.get("authBackoffSeconds") or 0)
+    last: ZenTaoError | None = None
+    for attempt in range(retries + 1):
+        if attempt:
             clear_token_cache()
-            token = fetch_token(cfg, force=True)
+            if backoff > 0:
+                time.sleep(backoff * attempt)
+        try:
+            token = fetch_token(cfg, force=attempt > 0)
             return api_request(cfg, method, path, token=token, body=body, query=query)
-        raise
+        except ZenTaoError as exc:
+            last = exc
+            # 过期 token 常返回登录页 HTML，HTTP 仍是 200，不是 401。502 后也可能紧接着拿到登录页。
+            retryable = exc.not_json or exc.status in (401, 502, 503, 504)
+            if not retryable or attempt == retries:
+                raise
+    if last is not None:
+        raise last
+    raise ZenTaoError("请求失败")
 
 
 def normalize_list(payload: Any, keys: tuple[str, ...]) -> list[dict[str, Any]]:
@@ -248,6 +274,10 @@ POLICY_DEFAULTS: dict[str, Any] = {
     "repoLock": "session_git_root",
     "assignToSelf": True,
     "titleStyleNote": "",
+    "serverUtcOffsetHours": 8,
+    "writeIntervalSeconds": 0.35,
+    "authRetries": 2,
+    "authBackoffSeconds": 0.5,
 }
 
 POLICY_TYPES: dict[str, type] = {
@@ -260,6 +290,10 @@ POLICY_TYPES: dict[str, type] = {
     "repoLock": str,
     "assignToSelf": bool,
     "titleStyleNote": str,
+    "serverUtcOffsetHours": float,
+    "writeIntervalSeconds": float,
+    "authRetries": int,
+    "authBackoffSeconds": float,
 }
 
 KNOWN_HOUR_METHODS = {"senior_by_volume_and_difficulty"}
@@ -276,7 +310,7 @@ def load_policy(cfg: dict[str, Any]) -> dict[str, Any]:
     defaults_used: list[str] = []
     for key, default in POLICY_DEFAULTS.items():
         value = raw.get(key)
-        if key in raw and value is not None and isinstance(value, POLICY_TYPES[key]):
+        if key in raw and value is not None and policy_type_matches(POLICY_TYPES[key], value):
             policy[key] = value
         else:
             policy[key] = default
@@ -293,6 +327,83 @@ def load_policy(cfg: dict[str, Any]) -> dict[str, Any]:
     else:
         policy["titleStyleNeedsAsk"] = True
     return policy
+
+
+def policy_type_matches(expected: type, value: Any) -> bool:
+    if expected is bool:
+        return isinstance(value, bool)
+    if expected is float:
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if expected is int:
+        return isinstance(value, int) and not isinstance(value, bool)
+    return isinstance(value, expected)
+
+
+def pause_between_writes(index: int, interval: float, sleep: Any = time.sleep) -> None:
+    if index > 0 and interval > 0:
+        sleep(interval)
+
+
+def strip_silent_fields(payload: dict[str, Any], fields: tuple[str, ...]) -> list[str]:
+    removed: list[str] = []
+    for key in fields:
+        if key in payload:
+            payload.pop(key)
+            removed.append(key)
+    return removed
+
+
+def task_action_timestamps(
+    estimate_hours: float | None,
+    *,
+    now: datetime,
+    offset_hours: float,
+) -> tuple[str, str]:
+    """动作接口把无时区字符串当服务器本地时间，再存成 UTC。带 Z 会被再减一次时差。"""
+    zone = timezone(timedelta(hours=float(offset_hours)))
+    end = now.astimezone(zone)
+    hours = float(estimate_hours or 0)
+    start = end - timedelta(hours=hours) if hours > 0 else end
+    fmt = "%Y-%m-%dT%H:%M:%S"
+    return start.strftime(fmt), end.strftime(fmt)
+
+
+def plan_task_status_writes(
+    task_id: int,
+    status: str,
+    account: str,
+    estimate_hours: float | None,
+    *,
+    now: datetime,
+    offset_hours: float,
+) -> list[dict[str, Any]]:
+    if status not in ("doing", "done"):
+        return []
+    started, finished = task_action_timestamps(estimate_hours, now=now, offset_hours=offset_hours)
+    actions = [
+        {
+            "method": "POST",
+            "path": f"/api.php/v1/tasks/{int(task_id)}/start",
+            "body": {"realStarted": started, "assignedTo": account},
+        }
+    ]
+    if status == "done":
+        finish_body: dict[str, Any] = {"finishedDate": finished, "assignedTo": account, "left": 0}
+        if estimate_hours is not None:
+            finish_body["currentConsumed"] = float(estimate_hours)
+        actions.append(
+            {
+                "method": "POST",
+                "path": f"/api.php/v1/tasks/{int(task_id)}/finish",
+                "body": finish_body,
+            }
+        )
+    return actions
+
+
+def start_error_is_already_started(exc: ZenTaoError) -> bool:
+    text = str(exc).lower()
+    return any(token in text for token in ("已经开始", "已经启动", "already started", "has started"))
 
 
 def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
@@ -860,6 +971,7 @@ def cmd_create_execution(args: argparse.Namespace) -> None:
         end = start + timedelta(days=14)
         payload.setdefault("begin", start.isoformat())
         payload.setdefault("end", end.isoformat())
+    ignored = strip_silent_fields(payload, ("realBegan", "realEnd"))
 
     result = request_with_auth(
         cfg,
@@ -878,18 +990,20 @@ def cmd_create_execution(args: argparse.Namespace) -> None:
         cfg["repos"][binding_path]["executionName"] = payload.get("name")
         save_config(cfg)
 
-    emit(
-        {
-            "ok": True,
-            "executionId": int(execution_id),
-            "projectId": int(project_id),
-            "name": payload.get("name"),
-            "code": payload.get("code"),
-            "url": execution_url(cfg, int(execution_id)),
-            "raw": result,
-            "updatedRepo": cwd,
-        }
-    )
+    emitted: dict[str, Any] = {
+        "ok": True,
+        "executionId": int(execution_id),
+        "projectId": int(project_id),
+        "name": payload.get("name"),
+        "code": payload.get("code"),
+        "url": execution_url(cfg, int(execution_id)),
+        "raw": result,
+        "updatedRepo": cwd,
+    }
+    if ignored:
+        emitted["ignoredFields"] = ignored
+        emitted["warning"] = "realBegan/realEnd 会被接口静默忽略，未写入。关闭迭代时 closedDate 由服务器时钟填写，可能和本机差一天。"
+    emit(emitted)
 
 
 def cmd_create_story(args: argparse.Namespace) -> None:
@@ -969,6 +1083,8 @@ def cmd_create_tasks(args: argparse.Namespace) -> None:
 
     created = []
     errors = []
+    write_index = 0
+    interval = float(policy.get("writeIntervalSeconds") or 0)
     for idx, task in enumerate(tasks):
         if not isinstance(task, dict):
             errors.append({"index": idx, "error": "task 不是对象"})
@@ -983,6 +1099,7 @@ def cmd_create_tasks(args: argparse.Namespace) -> None:
         except GuardError as exc:
             raise_guard(exc)
         body.setdefault("pri", 3)
+        strip_silent_fields(body, ("realStarted", "finishedDate", "realBegan", "realEnd"))
         if "estimate" in body and body["estimate"] is not None:
             body["estimate"] = float(body["estimate"])
         if not body.get("estStarted") or not body.get("deadline"):
@@ -990,6 +1107,8 @@ def cmd_create_tasks(args: argparse.Namespace) -> None:
             body.setdefault("estStarted", est)
             body.setdefault("deadline", deadline)
         try:
+            pause_between_writes(write_index, interval)
+            write_index += 1
             result = request_with_auth(
                 cfg,
                 "POST",
@@ -1034,36 +1153,91 @@ def cmd_update_status(args: argparse.Namespace) -> None:
         body: dict[str, Any] = {"status": status}
         if args.stage:
             body["stage"] = args.stage
-    elif entity == "task":
-        info = require_git_cwd(args.cwd)
-        try:
-            assert_bound_root(cfg, info["gitRoot"])
-            task = fetch_task(cfg, entity_id)
-            assert_task_owner(task, str(cfg.get("account") or ""), load_policy(cfg))
-        except GuardError as exc:
-            raise_guard(exc)
-        path = f"/api.php/v1/tasks/{entity_id}"
-        body = {"status": status}
-        if args.name:
-            body["name"] = args.name
-        if args.estimate is not None:
-            body["estimate"] = float(args.estimate)
-    else:
+        result = put_status(cfg, entity, entity_id, path, body)
+        emit({"ok": True, "type": entity, "id": entity_id, "status": status, "raw": result})
+        return
+    if entity != "task":
         die("type 只能是 story 或 task")
 
-    # 不同版本可能是 PUT 或 POST；先 PUT，失败再尝试常见变更接口
+    info = require_git_cwd(args.cwd)
     try:
-        result = request_with_auth(cfg, "PUT", path, body=body)
+        assert_bound_root(cfg, info["gitRoot"])
+        task = fetch_task(cfg, entity_id)
+        assert_task_owner(task, str(cfg.get("account") or ""), load_policy(cfg))
+    except GuardError as exc:
+        raise_guard(exc)
+
+    policy = load_policy(cfg)
+    account = str(cfg.get("account") or "")
+    interval = float(policy.get("writeIntervalSeconds") or 0)
+    estimate = args.estimate if args.estimate is not None else task.get("estimate")
+    step = 0
+    put_result = None
+    if args.name or args.estimate is not None:
+        put_body: dict[str, Any] = {}
+        if args.name:
+            put_body["name"] = args.name
+        if args.estimate is not None:
+            put_body["estimate"] = float(args.estimate)
+        strip_silent_fields(put_body, ("realStarted", "finishedDate", "realBegan", "realEnd"))
+        pause_between_writes(step, interval)
+        step += 1
+        put_result = put_status(cfg, "task", entity_id, f"/api.php/v1/tasks/{entity_id}", put_body)
+
+    actions = plan_task_status_writes(
+        entity_id,
+        status,
+        account,
+        float(estimate) if estimate is not None else None,
+        now=datetime.now(timezone.utc),
+        offset_hours=float(policy.get("serverUtcOffsetHours") or 0),
+    )
+    action_results = []
+    if actions:
+        for action in actions:
+            pause_between_writes(step, interval)
+            step += 1
+            try:
+                raw = request_with_auth(cfg, action["method"], action["path"], body=action["body"])
+            except ZenTaoError as exc:
+                if action["path"].endswith("/start") and start_error_is_already_started(exc):
+                    action_results.append({"path": action["path"], "skipped": True, "reason": str(exc)})
+                    continue
+                raise
+            action_results.append({"path": action["path"], "body": action["body"], "raw": raw})
+    elif put_result is None:
+        put_body = {"status": status}
+        put_result = put_status(cfg, "task", entity_id, f"/api.php/v1/tasks/{entity_id}", put_body)
+
+    emit(
+        {
+            "ok": True,
+            "type": "task",
+            "id": entity_id,
+            "status": status,
+            "actions": action_results,
+            "raw": put_result,
+        }
+    )
+
+
+def put_status(
+    cfg: dict[str, Any],
+    entity: str,
+    entity_id: int,
+    path: str,
+    body: dict[str, Any],
+) -> Any:
+    try:
+        return request_with_auth(cfg, "PUT", path, body=body)
     except ZenTaoError as exc:
         if exc.status in (404, 405, 400):
             alt = f"/api.php/v1/{entity}s/{entity_id}/status" if entity == "task" else path
             try:
-                result = request_with_auth(cfg, "POST", alt, body=body)
+                return request_with_auth(cfg, "POST", alt, body=body)
             except ZenTaoError:
                 raise exc from None
-        else:
-            raise
-    emit({"ok": True, "type": entity, "id": entity_id, "status": status, "raw": result})
+        raise
 
 
 def cmd_link_story_execution(args: argparse.Namespace) -> None:

@@ -108,7 +108,11 @@ python3 ~/.cursor/skills/zentao-dev-workflow/scripts/zentao.py list-products
     "requirePreview": true,
     "previewSurface": "canvas",
     "repoLock": "session_git_root",
-    "assignToSelf": true
+    "assignToSelf": true,
+    "serverUtcOffsetHours": 8,
+    "writeIntervalSeconds": 0.35,
+    "authRetries": 2,
+    "authBackoffSeconds": 0.5
   },
   "statusMap": {
     "storyAfterCreate": "active",
@@ -211,7 +215,7 @@ python3 -c "import json;d=json.load(open('config.example.json'));assert d['baseU
 按上文复制 `config.example.json` 到 `~/.config/zentao/config.json` 并填写。
 
 **Q: 401 / 认证失败**  
-检查 `baseUrl`、账号密码；确认实例已开启 REST（`/api.php/v1/tokens`）。
+检查 `baseUrl`、账号密码；确认实例已开启 REST（`/api.php/v1/tokens`）。token 过期时也可能返回登录页 HTML，HTTP 仍是 200。CLI 会把它当成需要重新登录。
 
 **Q: 列表为空或 403**  
 账号缺少产品/项目查看权限，请管理员开通。

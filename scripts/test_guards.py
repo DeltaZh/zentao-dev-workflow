@@ -11,7 +11,8 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -316,6 +317,88 @@ class CommandRejectTests(unittest.TestCase):
         with self.assertRaises(SystemExit) as caught:
             zentao.cmd_update_status(args)
         self.assertNotEqual(caught.exception.code, 0)
+
+
+class ApiPitTests(unittest.TestCase):
+    def test_timestamps_follow_server_offset_without_z(self) -> None:
+        now = datetime(2026, 10, 5, 3, 0, tzinfo=timezone.utc)
+        started, finished = zentao.task_action_timestamps(1.5, now=now, offset_hours=8)
+        self.assertEqual(started, "2026-10-05T09:30:00")
+        self.assertEqual(finished, "2026-10-05T11:00:00")
+        self.assertNotIn("Z", started + finished)
+
+    def test_integer_offset_and_interval_are_accepted(self) -> None:
+        policy = zentao.load_policy({"policy": {"serverUtcOffsetHours": 8, "writeIntervalSeconds": 1}})
+        self.assertEqual(policy["serverUtcOffsetHours"], 8)
+        self.assertEqual(policy["writeIntervalSeconds"], 1)
+        self.assertNotIn("serverUtcOffsetHours", policy["defaultsUsed"])
+
+    def test_strip_keeps_execution_status(self) -> None:
+        payload = {"name": "迭代", "realBegan": "2026-10-01", "realEnd": "2026-10-05", "status": "closed", "days": 3}
+        removed = zentao.strip_silent_fields(payload, ("realBegan", "realEnd"))
+        self.assertEqual(removed, ["realBegan", "realEnd"])
+        self.assertEqual(payload["status"], "closed")
+        self.assertEqual(payload["days"], 3)
+
+    def test_html_200_refreshes_token_and_retries(self) -> None:
+        calls = {"n": 0}
+
+        def fake_api(cfg, method, path, token=None, body=None, query=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise zentao.ZenTaoError("响应不是 JSON: <html>", status=200, body="<html>login", not_json=True)
+            return {"id": 1}
+
+        with mock.patch.object(zentao, "api_request", fake_api), mock.patch.object(
+            zentao, "fetch_token", side_effect=["old", "new"]
+        ) as fetch, mock.patch.object(zentao, "clear_token_cache") as clear, mock.patch.object(
+            zentao.time, "sleep"
+        ):
+            result = zentao.request_with_auth({}, "GET", "/api.php/v1/tasks/1")
+        self.assertEqual(result, {"id": 1})
+        clear.assert_called()
+        self.assertTrue(fetch.call_args_list[1].kwargs["force"])
+
+    def test_pause_only_between_writes(self) -> None:
+        slept: list[float] = []
+        zentao.pause_between_writes(0, 0.35, sleep=slept.append)
+        zentao.pause_between_writes(1, 0.35, sleep=slept.append)
+        self.assertEqual(slept, [0.35])
+
+    def _done_args(self, root: Path):
+        return zentao.build_parser().parse_args(
+            ["update-status", "--type", "task", "--id", "9", "--status", "done", "--cwd", str(root)]
+        )
+
+    def test_done_uses_start_and_finish_not_put(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = init_repo(Path(raw) / "repo")
+            cfg = Path(raw) / "config.json"
+            write_config(cfg, {str(root.resolve()): {"productId": 1, "projectId": 2}})
+            env = os.environ.copy()
+            env["ZENTAO_CONFIG"] = str(cfg)
+            env["ZENTAO_TOKEN_CACHE"] = str(Path(raw) / "token.json")
+            recorded: list[tuple[str, str, dict]] = []
+
+            def fake_request(cfg, method, path, body=None, query=None):
+                recorded.append((method, path, body or {}))
+                if path.endswith("/start"):
+                    raise zentao.ZenTaoError("任务已经开始", status=400, body="已经开始")
+                return {"id": 9}
+
+            with mock.patch.dict(os.environ, env, clear=False), mock.patch.object(
+                zentao, "fetch_task", return_value={"id": 9, "openedBy": "me", "estimate": 1.5, "name": "实现导出"}
+            ), mock.patch.object(zentao, "request_with_auth", fake_request), mock.patch.object(
+                zentao, "task_action_timestamps", return_value=("2026-10-05T09:30:00", "2026-10-05T11:00:00")
+            ):
+                with redirect_stdout(io.StringIO()):
+                    zentao.cmd_update_status(self._done_args(root))
+        self.assertTrue(recorded[0][1].endswith("/start"))
+        self.assertEqual(recorded[0][2]["realStarted"], "2026-10-05T09:30:00")
+        self.assertTrue(recorded[1][1].endswith("/finish"))
+        self.assertEqual(recorded[1][2]["finishedDate"], "2026-10-05T11:00:00")
+        self.assertNotIn("Z", recorded[1][2]["finishedDate"])
+        self.assertFalse(any(method == "PUT" for method, _, _ in recorded))
 
 
 if __name__ == "__main__":
