@@ -2,12 +2,21 @@
   "baseUrl": "https://zentao.example.com",
   "account": "your_account",
   "password": "your_password",
-  "defaults": {
-    "hourBias": "high_efficiency",
+    "defaults": {
     "storyCategory": "feature",
     "confirmBeforeWrite": true,
-    "assignToSelf": true,
     "doNotChangeProjectStatus": true
+  },
+  "policy": {
+    "hourMethod": "senior_by_volume_and_difficulty",
+    "titleStyle": "verb_result",
+    "titleStyleNote": "",
+    "allowReadOthersTasks": true,
+    "allowModifyOthersTasks": false,
+    "requirePreview": true,
+    "previewSurface": "canvas",
+    "repoLock": "session_git_root",
+    "assignToSelf": true
   },
   "statusMap": {
     "storyAfterCreate": "active",

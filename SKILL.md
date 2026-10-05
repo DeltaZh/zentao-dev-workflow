@@ -1,12 +1,12 @@
 ---
 name: zentao-dev-workflow
-description: 通过禅道 REST API 按固定顺序新建产品/项目、创建并评审需求、创建迭代、关联需求、创建并完成开发任务。在用户提到禅道、新建产品、新建项目、创建需求、评审需求、建迭代、开发任务、收工补任务/工时、绑定产品项目，或要求把某次改动同步到禅道时使用。
+description: 通过禅道 REST API 按固定顺序新建产品/项目、创建并评审需求、创建迭代、关联需求、创建并完成开发任务。在用户提到禅道、新建产品、新建项目、创建需求、评审需求、建迭代、开发任务、收工补任务/工时、绑定产品项目，或要求把某次改动同步到禅道时使用。也在工时偏短、写入前要预览、误改他人任务、窜到其他 git 仓库时使用。
 ---
 
 # 禅道开发工作流
 
 用个人配置调用本 Skill 自带 CLI，把 Cursor 中的改动同步为禅道需求/任务。  
-**任何写操作（创建、改状态、关联）之前，必须先给出摘要并得到用户确认。**
+**任何写操作之前，必须先出预览。** `requirePreview` 为 true 时，用户在当前对话确认后才调用写接口。
 
 ## 强制顺序（硬门槛，禁止打乱）
 
@@ -37,15 +37,67 @@ description: 通过禅道 REST API 按固定顺序新建产品/项目、创建�
 
 ## 站立约定（默认，用户未特别说明时）
 
-1. **人员一律当前登录用户**：需求/任务的负责人、指派给、开发（以及激活评审人 `reviewer`）默认都用配置里的 `account`（即 CLI 当前登录账号）。**禁止**擅自指派给他人；仅当用户当次明确指定别人时才改。
+1. **人员一律当前登录用户**：需求/任务的负责人、指派给、开发（以及激活评审人 `reviewer`）默认都用配置里的 `account`。`policy.assignToSelf` 为 true 时，新建任务只能指派给该账号；用户当次要改派给别人，先说明需把该键改为 false，确认后再写。禁止先改派再改别人的任务。
 2. **项目/执行状态由用户管**：用户在禅道 UI 里改的项目状态（如「已开始」）以用户为准；Agent **不要**主动改项目/迭代的 `status`（`wait`/`doing`/`closed` 等），除非用户当次要求。
 3. **文案直白、禁止讨论代号**：需求标题/描述/验收、任务名称/描述里，**不要**写「方案 A/B」「策略 D」「硬门槛 A/B/C」「风控 B1」等仅在对话里出现的代号；要写成普通人能看懂的「是什么 + 为什么 + 怎么验收」。技术名词（Sidecar、Cookie）可保留，但必须有中文说明。
+
+## 生效口径
+
+写操作前先跑 `show-policy`。优先级：用户当次口头指令 > `policy` > 技能默认。不认识的 `hourMethod` 或 `titleStyle`（`titleStyleNeedsAsk=true`）先问用户，不要套默认算法。`defaults.hourBias` 和 `defaults.assignToSelf` 忽略。
+
+工时按代码量（模块、大约文件数）和难度（新逻辑还是机械修改、是否跨模块、风险），用该任务类型的资深角色估算：`devel` 资深开发，`test` 资深测试，`design` 资深设计，其余类型用该类型的资深执行者。用户当次给出的数字优先。CLI 不改小时数。标题默认是动词开头的结果句，例如「实现订单按日期导出 Excel」。
+
+三句说明写在预览里：任务只从本次锁定仓库的 git diff 和这次对话拆出；工时看代码量和难度；标题按当前 `titleStyle` / `titleStyleNote`。还不能预览时（仓库或产品未定），在对话里先说这三句，并且不调用写接口。
+
+## 仓库锁定
+
+1. 会话里有多个仓库时，先问用哪一个。锁定用户点名的业务仓库的 **git 根目录**。
+2. `inspect-repo --cwd <git 根目录>` 的 `gitRoot` 和 `remote` 是预览里的仓库信息，不要手写。
+3. 根目录和点名仓库不一致：只展示核对结果并停下，不列出将新建的任务，不调用写接口。
+4. `remote` 为空：可以列出任务草稿，顶部标明无远程。用户确认这条路径之前不写。
+5. `bind-repo`、`create-story`、`create-execution`、`create-tasks`、任务 `update-status` 的 `--cwd` 必须已经是这个 git 根目录。
+6. 建任务、改任务还要求该根目录已绑定。绑定路径不是 git 根目录时，请用户重新绑定，不要改写配置。
+7. git diff / status 只在这个根目录里跑。改动若在别的仓库，停下来问，不要跟着窜过去。
+
+## 任务归属
+
+- 可读别人的任务（`list-tasks`）用来去重。`allowReadOthersTasks=false` 时列表只有自己建的。
+- 只能新建任务，或修改 `openedBy` 等于当前账号的任务（状态、标题、工时）。不认 `assignedTo`。
+- 创建人解析不出：该条只读。禁止改派给自己再写。
+
+## 预览
+
+`previewSurface=canvas` 时，把 `$SKILL/templates/zentao-preview.canvas.tsx` 里的 `PREVIEW` 换成当次数据，覆盖写入当前会话的 `canvases/zentao-preview.canvas.tsx`。不写进业务 git 仓库，不写进别的项目。数据嵌在文件里。Canvas 上不放写入按钮，也不要为此新开对话。对话里只留该文件的绝对路径链接，以及「请回复确认或修改意见」。
+
+空数组不要渲染对应区块。仓库不一致时只留警告。密码和 Token 不进 Canvas。
+
+`previewSurface=text`，或 Canvas 写不出时，用下面的文本预览，并在写不出时标明「Canvas 不可用」。确认门槛不变。`requirePreview=false` 时仍出同一份预览，第一行写「配置已关闭确认，将直接写入」。用户改了内容就重出预览，再等一次确认。
+
+文本预览字段：
+
+```text
+【禅道预览】
+仓库：<git 根目录>
+远程：<origin，没有则写无远程>
+绑定：产品 名称 (#id) / 项目 名称 (#id)
+需求：#id 「标题」 status=...
+迭代：#id 「名称」 | 新建「名称」
+说明：任务从本次锁定仓库的 diff 和这次对话拆出；工时按代码量和难度，由该类型资深角色估算；标题为动词开头的结果句
+将新建：
+  1. 实现订单按日期导出 Excel | devel | 资深开发 | 代码量 | 难度 | 6h | 指派账号 | 完成后标记完成或保持未完成
+将修改（仅自己建的）：
+  - #任务id 原标题 | 改什么 | 原工时 → 新工时
+只读、不改：
+  - #任务id 标题 | 创建人
+请回复确认 / 修改意见
+```
 
 ## 前置检查
 
 1. 若配置不存在：指导用户复制 `config.example.json` → `~/.config/zentao/config.json`，填 `baseUrl` / `account` / `password`，权限建议 `chmod 600`
 2. 运行 `python3 "$SKILL/scripts/zentao.py" auth` 验证登录
-3. `python3 "$SKILL/scripts/zentao.py" show-repo --cwd "<workspace>"` 检查是否已绑定
+3. `python3 "$SKILL/scripts/zentao.py" show-policy` 读取口径
+4. `python3 "$SKILL/scripts/zentao.py" inspect-repo --cwd "<git 根目录>"` 核对仓库。不要用子目录，也不要默认进程当前目录
 
 ## 仓库绑定（首次）
 
@@ -56,7 +108,7 @@ description: 通过禅道 REST API 按固定顺序新建产品/项目、创建�
 3. `list-projects --product <id>` → 选项目，或选「新建项目」  
 4. 若新建项目：确认摘要（名称/代号/关联产品/起止日期）→ `create-project` → 用返回的 `projectId`  
 5. 可选：`list-executions --project <id>` → 选默认迭代；可跳过，收工时再建/再选  
-6. `bind-repo --cwd "<workspace>" --product <id> --project <id> [--execution <id>]`  
+6. `bind-repo --cwd "<git 根目录>" --product <id> --project <id> [--execution <id>]`  
 7. 当次换产品不改绑定；用户说「换绑 / 以后都用这个」才重新 bind
 
 ## 新建产品 / 项目（可独立触发）
@@ -105,7 +157,7 @@ python3 "$SKILL/scripts/zentao.py" create-project --payload /tmp/zentao-project.
 4. 创建需求：
 
 ```bash
-python3 "$SKILL/scripts/zentao.py" create-story --payload /tmp/zentao-story.json --cwd "<workspace>"
+python3 "$SKILL/scripts/zentao.py" create-story --payload /tmp/zentao-story.json --cwd "<git 根目录>"
 ```
 
 5. 立刻评审/激活（仍需先确认，除非用户已说「创建并评审」）：
@@ -125,23 +177,23 @@ python3 "$SKILL/scripts/zentao.py" get-story --id <storyId>
 1. 定位需求：用户指定 ID → 绑定里的 `lastStoryId` → 再询问  
 2. **先** `get-story`：必须 `status=active`。若是 `changed`/未评审，先走评审，禁止继续  
 3. 确定执行：绑定值 / 用户指定 / `list-executions` 选择；没有则 **create-execution**（不要在未激活需求上建任务）  
-4. 结合 git diff / 会话拆 1～N 条开发任务；`type` 默认 `devel`；`assignedTo` 默认配置 `account`  
-5. **工时**：按熟悉代码库 + AI 辅助的偏高效率估算（明显短于纯人工；单任务常见 0.5～4h；用户给定工时时以用户为准）  
-6. 展示整包摘要（迭代、关联、任务、工时、完成状态），等待确认  
-7. **严格按序**执行：
+4. 先 `list-tasks --execution <id>` 读已有任务用来去重。只根据本次锁定仓库的 git diff 和这次对话拆 1～N 条新任务。`type` 默认 `devel`。指派只能是当前账号，除非 `assignToSelf` 已关闭且用户确认
+5. **工时**：按代码量和难度，用该任务类型的资深角色估算。预览里写明代入的代码量、难度、角色和小时数。用户当次给出的数字优先。不要把工时压到低于这份估算
+6. 按「预览」出 Canvas 或文本，等待确认（`requirePreview=false` 时仍要出预览）
+7. **严格按序**执行，`--cwd` 使用 `inspect-repo` 返回的 git 根目录：
 
 ```bash
 # 若需新建迭代
-python3 "$SKILL/scripts/zentao.py" create-execution --payload /tmp/zentao-execution.json --cwd "<workspace>"
+python3 "$SKILL/scripts/zentao.py" create-execution --payload /tmp/zentao-execution.json --cwd "<git 根目录>"
 
 # 关联（需求必须已 active）
 python3 "$SKILL/scripts/zentao.py" link-story-execution --story <id> --execution <id>
 
 # 建任务
-python3 "$SKILL/scripts/zentao.py" create-tasks --payload /tmp/zentao-tasks.json
+python3 "$SKILL/scripts/zentao.py" create-tasks --payload /tmp/zentao-tasks.json --cwd "<git 根目录>"
 
-# 完成任务（不要改需求正文）
-python3 "$SKILL/scripts/zentao.py" update-status --type task --id <id> --status done
+# 完成自己的任务（不要改需求正文，不要改别人的任务）
+python3 "$SKILL/scripts/zentao.py" update-status --type task --id <id> --status done --cwd "<git 根目录>"
 ```
 
 8. 需求阶段如需标记研发完毕，仅更新 `stage`（保持 `status=active`），**禁止**再改 `title`/`spec`/`verify`：
@@ -154,17 +206,18 @@ python3 "$SKILL/scripts/zentao.py" update-status --type story --id <id> --status
 
 ## 确认摘要模板
 
+产品/项目新建等尚无任务表时，仍用这段文本，并遵守「预览」的确认规则。收工任务预览用上一节的 Canvas 或文本，不要两份一起贴。
+
 ```text
 【禅道待确认】
 类型：新建产品 | 新建项目 | 开工(建需求+评审) | 收工(迭代→关联→任务→完成) | 全链路
 当前顺序步骤：1建需求 / 2评审 / 3建迭代 / 4关联 / 5建任务 / 6完成
-仓库：...
+仓库：<git 根目录>
+远程：<origin>
 产品：name (#id)
 项目：name (#id)
 需求：新建「标题」| 已有 #id | status=...
 执行/迭代：新建「…」| 已有 #id | 无
-任务：
-  - 标题A | 预计 1.0h | devel
 状态计划：需求保持 active；任务→done；阶段→developed（如需要）
 风险：若顺序错或改需求正文 → 会变成 changed，需重新评审
 请回复确认 / 修改意见
@@ -178,17 +231,20 @@ python3 "$SKILL/scripts/zentao.py" list-programs
 python3 "$SKILL/scripts/zentao.py" list-products
 python3 "$SKILL/scripts/zentao.py" list-projects --product <id>
 python3 "$SKILL/scripts/zentao.py" list-executions --project <id>
+python3 "$SKILL/scripts/zentao.py" show-policy
+python3 "$SKILL/scripts/zentao.py" inspect-repo --cwd "<git 根目录>"
+python3 "$SKILL/scripts/zentao.py" list-tasks --execution <id>
 python3 "$SKILL/scripts/zentao.py" show-repo --cwd "<path>"
-python3 "$SKILL/scripts/zentao.py" bind-repo --cwd "<path>" --product <id> --project <id> [--execution <id>]
+python3 "$SKILL/scripts/zentao.py" bind-repo --cwd "<git 根目录>" --product <id> --project <id> [--execution <id>]
 python3 "$SKILL/scripts/zentao.py" create-product --payload <file>
 python3 "$SKILL/scripts/zentao.py" create-project --payload <file>
-python3 "$SKILL/scripts/zentao.py" create-story --payload <file> [--cwd "<path>"]
+python3 "$SKILL/scripts/zentao.py" create-story --payload <file> --cwd "<git 根目录>"
 python3 "$SKILL/scripts/zentao.py" get-story --id <id>
 python3 "$SKILL/scripts/zentao.py" review-story --id <id> [--assigned-to <account>] [--comment <text>]
-python3 "$SKILL/scripts/zentao.py" create-execution --payload <file> [--cwd "<path>"]
+python3 "$SKILL/scripts/zentao.py" create-execution --payload <file> --cwd "<git 根目录>"
 python3 "$SKILL/scripts/zentao.py" link-story-execution --story <id> --execution <id>
-python3 "$SKILL/scripts/zentao.py" create-tasks --payload <file>
-python3 "$SKILL/scripts/zentao.py" update-status --type story|task --id <id> --status <name> [--stage <stage>]
+python3 "$SKILL/scripts/zentao.py" create-tasks --payload <file> --cwd "<git 根目录>"
+python3 "$SKILL/scripts/zentao.py" update-status --type story|task --id <id> --status <name> [--stage <stage>] [--name <标题>] [--estimate <小时>] [--cwd "<git 根目录>"]
 ```
 
 stdout 为 JSON；错误在 stderr，非零退出。
@@ -201,8 +257,12 @@ stdout 为 JSON；错误在 stderr，非零退出。
 - `review-story` 失败：明确告知需 UI 人工评审；**阻塞**后续建迭代/任务直到 `get-story` 显示 active  
 - `status=changed`：停止后续写操作，先重新评审  
 - 状态名不匹配：展示原始错误，请用户给正确值并建议写回 `statusMap`  
-- 关联执行接口不可用：告知需 UI 手动关联；仅在需求已 active 时可继续建任务（若实例允许）  
+- 关联执行接口不可用：告知需 UI 手动关联；仅在需求已 active 时可继续建任务（若实例允许）
+- `--cwd` 不是 git 根目录：使用 stderr 里的 `gitRoot` 问用户，不要改到另一个仓库
+- 仓库未绑定，或绑定路径不是 git 根目录：先绑定或请用户重新绑定，不要自动改配置
+- `openedBy` 不是当前账号，或创建人解析不出：跳过该任务，不要改派后再写
+- 批量建任务部分失败：只报告已成功的 id，只重试失败项；内容有变化则重新预览
 
 ## 非目标
 
-不处理 Bug/测试单/发布；不在未确认时静默创建；不在评审后擅自改需求正文；不把凭证写入环境变量或项目仓库。
+不处理 Bug/测试单/发布；不在未确认时静默创建（`requirePreview=false` 时仍要输出预览）；不在评审后擅自改需求正文；不把凭证写入环境变量、项目仓库或 Canvas。

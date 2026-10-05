@@ -1,6 +1,6 @@
 # zentao-dev-workflow
 
-Cursor Agent Skill：把当前改动同步到禅道（ZenTao）——支持新建产品/项目、创建研发需求与开发任务、关联执行/迭代、填写偏高效率预计工时并更新状态。
+Cursor Agent Skill：把当前改动同步到禅道（ZenTao）——支持新建产品/项目、创建研发需求与开发任务、关联执行/迭代，并在写入前用预览核对仓库、工时和任务。
 
 写操作默认**先展示摘要，经你确认后再调用接口**，避免误建。
 
@@ -96,9 +96,19 @@ python3 ~/.cursor/skills/zentao-dev-workflow/scripts/zentao.py list-products
   "account": "your_account",
   "password": "your_password",
   "defaults": {
-    "hourBias": "high_efficiency",
     "storyCategory": "feature",
     "confirmBeforeWrite": true
+  },
+  "policy": {
+    "hourMethod": "senior_by_volume_and_difficulty",
+    "titleStyle": "verb_result",
+    "titleStyleNote": "",
+    "allowReadOthersTasks": true,
+    "allowModifyOthersTasks": false,
+    "requirePreview": true,
+    "previewSurface": "canvas",
+    "repoLock": "session_git_root",
+    "assignToSelf": true
   },
   "statusMap": {
     "storyAfterCreate": "active",
@@ -127,11 +137,7 @@ python3 ~/.cursor/skills/zentao-dev-workflow/scripts/zentao.py list-products
 2. **开工**：起草需求 → 你确认 → 创建 → **评审激活** → 返回需求 ID/链接与状态
 3. **收工**：确认需求已激活 → 建/选迭代 → 关联需求 → 拆任务与工时 → 你确认 → 建任务并完成
 
-强制顺序：`建需求 → 评审 → 建迭代 → 关联 → 建任务 → 完成`。乱序会导致需求变成变更态。
-
-### 工时原则
-
-按「熟悉代码库 + AI 辅助」估算，通常明显短于纯人工；你若直接给出工时，以你的为准。
+强制顺序：`建需求 → 评审 → 建迭代 → 关联 → 建任务 → 完成`。乱序会导致需求变成变更态。工时、标题和任务归属在写入前的预览里说明，口径见 [SKILL.md](SKILL.md)，这里不重复算法。
 
 ## CLI 速查
 
@@ -143,16 +149,19 @@ python3 scripts/zentao.py list-programs
 python3 scripts/zentao.py list-products
 python3 scripts/zentao.py list-projects --product <id>
 python3 scripts/zentao.py list-executions --project <id>
-python3 scripts/zentao.py show-repo --cwd "<workspace>"
-python3 scripts/zentao.py bind-repo --cwd "<workspace>" --product <id> --project <id> [--execution <id>]
+python3 scripts/zentao.py show-policy
+python3 scripts/zentao.py inspect-repo --cwd "<git 根目录>"
+python3 scripts/zentao.py list-tasks --execution <id>
+python3 scripts/zentao.py show-repo --cwd "<git 根目录>"
+python3 scripts/zentao.py bind-repo --cwd "<git 根目录>" --product <id> --project <id> [--execution <id>]
 python3 scripts/zentao.py create-product --payload <file.json>
 python3 scripts/zentao.py create-project --payload <file.json>
-python3 scripts/zentao.py create-story --payload <file.json> [--cwd "<workspace>"]
+python3 scripts/zentao.py create-story --payload <file.json> --cwd "<git 根目录>"
 python3 scripts/zentao.py get-story --id <id>
 python3 scripts/zentao.py review-story --id <id>
-python3 scripts/zentao.py create-execution --payload <file.json> [--cwd "<workspace>"]
-python3 scripts/zentao.py create-tasks --payload <file.json>
-python3 scripts/zentao.py update-status --type story|task --id <id> --status <name> [--stage <stage>]
+python3 scripts/zentao.py create-execution --payload <file.json> --cwd "<git 根目录>"
+python3 scripts/zentao.py create-tasks --payload <file.json> --cwd "<git 根目录>"
+python3 scripts/zentao.py update-status --type story|task --id <id> --status <name> [--stage <stage>] [--name <标题>] [--estimate <小时>] [--cwd "<git 根目录>"]
 python3 scripts/zentao.py link-story-execution --story <id> --execution <id>
 ```
 
@@ -169,7 +178,9 @@ zentao-dev-workflow/
 ├── SKILL.md                 # Agent 主说明（触发条件与流程）
 ├── reference.md             # API 字段与状态参考
 ├── config.example.json      # 配置模板（仅占位符）
+├── templates/zentao-preview.canvas.tsx
 ├── scripts/zentao.py        # REST CLI
+├── scripts/test_guards.py   # 仓库与归属校验测试
 ├── README.md
 └── docs/                    # 设计与实现计划
 ```

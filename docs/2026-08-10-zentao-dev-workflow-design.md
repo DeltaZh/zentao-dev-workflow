@@ -1,7 +1,7 @@
 # 禅道开发工作流 Skill 设计规格
 
 日期：2026-08-10  
-状态：待用户审阅  
+状态：工时原则与确认摘要已被 [2026-10-04 规格](superpowers/specs/2026-10-04-zentao-preview-guard-design.md) 替换。下文第 5.4、5.5 节只作历史记录，不要按其中的工时口径执行。  
 目标位置：个人 Skill `~/.cursor/skills/zentao-dev-workflow/`
 
 ## 1. 背景与目标

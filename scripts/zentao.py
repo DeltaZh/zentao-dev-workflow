@@ -8,6 +8,7 @@ import json
 import os
 import re
 import ssl
+import subprocess
 import sys
 import urllib.error
 import urllib.parse
@@ -16,7 +17,10 @@ from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-CONFIG_PATH = Path(os.environ.get("ZENTAO_CONFIG", Path.home() / ".config/zentao/config.json"))
+def config_path() -> Path:
+    return Path(os.environ.get("ZENTAO_CONFIG", Path.home() / ".config" / "zentao" / "config.json"))
+
+
 TOKEN_CACHE_PATH = Path(
     os.environ.get("ZENTAO_TOKEN_CACHE", Path.home() / ".config/zentao/token-cache.json")
 )
@@ -40,13 +44,14 @@ def die(message: str, code: int = 1) -> None:
 
 
 def load_config() -> dict[str, Any]:
-    if not CONFIG_PATH.is_file():
+    path = config_path()
+    if not path.is_file():
         die(
-            f"缺少配置文件: {CONFIG_PATH}\n"
+            f"缺少配置文件: {path}\n"
             "请复制 skill 内 config.example.json 到该路径并填写 baseUrl/account/password。"
         )
     try:
-        cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        cfg = json.loads(path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         die(f"配置文件 JSON 无效: {exc}")
     for key in ("baseUrl", "account", "password"):
@@ -60,10 +65,11 @@ def load_config() -> dict[str, Any]:
 
 
 def save_config(cfg: dict[str, Any]) -> None:
-    CONFIG_PATH.parent.mkdir(parents=True, exist_ok=True)
-    CONFIG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     try:
-        CONFIG_PATH.chmod(0o600)
+        path.chmod(0o600)
     except OSError:
         pass
 
@@ -217,6 +223,248 @@ def resolve_cwd(cwd: str | None) -> str:
     return str(path)
 
 
+class GuardError(Exception):
+    def __init__(self, message: str, **details: Any):
+        super().__init__(message)
+        self.details = {key: value for key, value in details.items() if value is not None}
+
+
+def raise_guard(exc: GuardError) -> None:
+    lines = [str(exc)]
+    for key in ("gitRoot", "remote", "taskId", "openedBy", "bindingPath", "policyKey"):
+        value = exc.details.get(key)
+        if value is not None and value != "":
+            lines.append(f"{key}={value}")
+    die("\n".join(lines))
+
+
+POLICY_DEFAULTS: dict[str, Any] = {
+    "hourMethod": "senior_by_volume_and_difficulty",
+    "titleStyle": "verb_result",
+    "allowReadOthersTasks": True,
+    "allowModifyOthersTasks": False,
+    "requirePreview": True,
+    "previewSurface": "canvas",
+    "repoLock": "session_git_root",
+    "assignToSelf": True,
+    "titleStyleNote": "",
+}
+
+POLICY_TYPES: dict[str, type] = {
+    "hourMethod": str,
+    "titleStyle": str,
+    "allowReadOthersTasks": bool,
+    "allowModifyOthersTasks": bool,
+    "requirePreview": bool,
+    "previewSurface": str,
+    "repoLock": str,
+    "assignToSelf": bool,
+    "titleStyleNote": str,
+}
+
+KNOWN_HOUR_METHODS = {"senior_by_volume_and_difficulty"}
+KNOWN_TITLE_STYLES = {"verb_result"}
+KNOWN_PREVIEW_SURFACES = {"canvas", "text"}
+KNOWN_REPO_LOCKS = {"session_git_root"}
+
+
+def load_policy(cfg: dict[str, Any]) -> dict[str, Any]:
+    raw = cfg.get("policy")
+    if not isinstance(raw, dict):
+        raw = {}
+    policy: dict[str, Any] = {}
+    defaults_used: list[str] = []
+    for key, default in POLICY_DEFAULTS.items():
+        value = raw.get(key)
+        if key in raw and value is not None and isinstance(value, POLICY_TYPES[key]):
+            policy[key] = value
+        else:
+            policy[key] = default
+            defaults_used.append(key)
+    policy["defaultsUsed"] = defaults_used
+    policy["hourMethodRecognized"] = policy["hourMethod"] in KNOWN_HOUR_METHODS
+    policy["previewSurfaceRecognized"] = policy["previewSurface"] in KNOWN_PREVIEW_SURFACES
+    policy["repoLockRecognized"] = policy["repoLock"] in KNOWN_REPO_LOCKS
+    note = str(policy.get("titleStyleNote") or "").strip()
+    if policy["titleStyle"] == "verb_result":
+        policy["titleStyleNeedsAsk"] = False
+    elif note:
+        policy["titleStyleNeedsAsk"] = False
+    else:
+        policy["titleStyleNeedsAsk"] = True
+    return policy
+
+
+def run_git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-C", str(cwd), *args],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def assert_git_root(cwd: str) -> dict[str, Any]:
+    raw = Path(cwd).expanduser()
+    if not raw.exists() or not raw.is_dir():
+        raise GuardError(f"路径不存在: {cwd}", policyKey="repoLock")
+    path = raw.resolve()
+    top = run_git(path, "rev-parse", "--show-toplevel")
+    if top.returncode != 0 or not top.stdout.strip():
+        raise GuardError(f"不是 git 仓库: {path}。请改用 git 根目录。", policyKey="repoLock")
+    git_root = Path(top.stdout.strip()).resolve()
+    remote_proc = run_git(git_root, "remote", "get-url", "origin")
+    remote = remote_proc.stdout.strip() if remote_proc.returncode == 0 and remote_proc.stdout.strip() else None
+    if path != git_root:
+        raise GuardError(
+            f"--cwd 不是 git 根目录。请改用 {git_root}，不要使用子目录。",
+            gitRoot=str(git_root),
+            remote=remote,
+            policyKey="repoLock",
+        )
+    branch_proc = run_git(git_root, "rev-parse", "--abbrev-ref", "HEAD")
+    branch = branch_proc.stdout.strip() if branch_proc.returncode == 0 and branch_proc.stdout.strip() else "HEAD"
+    return {"gitRoot": str(git_root), "remote": remote, "branch": branch}
+
+
+def require_git_cwd(cwd: str | None) -> dict[str, Any]:
+    try:
+        if not cwd:
+            raise GuardError("写操作必须带 --cwd，且必须是 git 根目录。", policyKey="repoLock")
+        return assert_git_root(cwd)
+    except GuardError as exc:
+        raise_guard(exc)
+        raise AssertionError("raise_guard 不会返回")
+
+
+def find_binding(cfg: dict[str, Any], git_root: str) -> tuple[dict[str, Any] | None, str | None, bool]:
+    repos = cfg.get("repos") or {}
+    if not isinstance(repos, dict):
+        return None, None, False
+    root = Path(git_root).expanduser().resolve()
+    related: tuple[dict[str, Any], str, bool] | None = None
+    for key, binding in repos.items():
+        if not isinstance(binding, dict):
+            continue
+        try:
+            key_path = Path(str(key)).expanduser().resolve()
+        except OSError:
+            continue
+        if key_path == root:
+            return binding, str(key), True
+        if root in key_path.parents or key_path in root.parents:
+            related = (binding, str(key), False)
+    if related:
+        return related
+    return None, None, False
+
+
+def assert_bound_root(cfg: dict[str, Any], git_root: str) -> dict[str, Any]:
+    binding, binding_path, is_root = find_binding(cfg, git_root)
+    if binding is not None and is_root:
+        return binding
+    if binding is not None and not is_root:
+        raise GuardError(
+            "绑定路径不是 git 根目录，请重新绑定。不会自动改写配置。",
+            gitRoot=git_root,
+            bindingPath=binding_path,
+            policyKey="repoLock",
+        )
+    raise GuardError("仓库未绑定。请先 bind-repo。", gitRoot=git_root, policyKey="repoLock")
+
+
+def parse_account(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if isinstance(value, dict):
+        item = value.get("account")
+        if isinstance(item, str) and item.strip():
+            return item.strip()
+    return None
+
+
+def assert_task_owner(task: dict[str, Any], account: str, policy: dict[str, Any]) -> str:
+    opened = parse_account(task.get("openedBy"))
+    task_id = task.get("id")
+    if opened is None:
+        raise GuardError(
+            "创建人字段解析不出，该条只读，不修改。",
+            taskId=task_id,
+            unknown=True,
+            policyKey="allowModifyOthersTasks",
+        )
+    if opened != account and not policy.get("allowModifyOthersTasks"):
+        raise GuardError(
+            "openedBy 不是当前账号，拒绝修改。可调整 policy.allowModifyOthersTasks。",
+            taskId=task_id,
+            openedBy=opened,
+            policyKey="allowModifyOthersTasks",
+        )
+    return opened
+
+
+def assert_assign_self(assigned_to: str | None, account: str, policy: dict[str, Any]) -> str:
+    if not policy.get("assignToSelf", True):
+        return assigned_to or account
+    if assigned_to and assigned_to != account:
+        raise GuardError(
+            f"assignToSelf 为 true 时不能指派给 {assigned_to}。请改 policy.assignToSelf，或改为当前账号。",
+            policyKey="assignToSelf",
+        )
+    return account
+
+
+def task_summary(task: dict[str, Any]) -> dict[str, Any]:
+    opened = parse_account(task.get("openedBy"))
+    assigned = parse_account(task.get("assignedTo"))
+    if assigned is None and isinstance(task.get("assignedTo"), str):
+        assigned = task.get("assignedTo")
+    return {
+        "id": task.get("id"),
+        "name": task.get("name"),
+        "openedBy": opened,
+        "openedByKnown": opened is not None,
+        "assignedTo": assigned,
+        "estimate": task.get("estimate"),
+        "status": task.get("status"),
+    }
+
+
+def visible_tasks(tasks: list[dict[str, Any]], account: str, policy: dict[str, Any]) -> list[dict[str, Any]]:
+    summaries = [task_summary(task) for task in tasks if isinstance(task, dict)]
+    if policy.get("allowReadOthersTasks", True):
+        return summaries
+    return [item for item in summaries if item.get("openedBy") == account]
+
+
+def unwrap_task(payload: Any) -> dict[str, Any]:
+    if isinstance(payload, dict):
+        if "openedBy" in payload or "name" in payload:
+            return payload
+        for key in ("task", "data"):
+            inner = payload.get(key)
+            if isinstance(inner, dict):
+                return inner
+        return payload
+    raise GuardError("读取任务失败，无法确认创建人，该条只读。", unknown=True, policyKey="allowModifyOthersTasks")
+
+
+def fetch_task(cfg: dict[str, Any], task_id: int) -> dict[str, Any]:
+    result = request_with_auth(cfg, "GET", f"/api.php/v1/tasks/{int(task_id)}")
+    return unwrap_task(result)
+
+
+def fetch_execution_tasks(cfg: dict[str, Any], execution_id: int) -> list[dict[str, Any]]:
+    payload = request_with_auth(
+        cfg,
+        "GET",
+        f"/api.php/v1/executions/{int(execution_id)}/tasks",
+        query={"limit": 1000, "page": 1},
+    )
+    return normalize_list(payload, ("tasks", "data"))
+
+
 def find_by_id(items: list[dict[str, Any]], item_id: int) -> dict[str, Any] | None:
     for item in items:
         try:
@@ -349,7 +597,8 @@ def cmd_show_repo(args: argparse.Namespace) -> None:
 
 def cmd_bind_repo(args: argparse.Namespace) -> None:
     cfg = load_config()
-    cwd = resolve_cwd(args.cwd)
+    info = require_git_cwd(args.cwd)
+    cwd = info["gitRoot"]
     products = normalize_list(
         request_with_auth(cfg, "GET", "/api.php/v1/products", query={"limit": 1000, "page": 1}),
         ("products", "data"),
@@ -395,7 +644,7 @@ def cmd_bind_repo(args: argparse.Namespace) -> None:
     }
     cfg["repos"][cwd] = binding
     save_config(cfg)
-    emit({"ok": True, "cwd": cwd, "binding": binding, "configPath": str(CONFIG_PATH)})
+    emit({"ok": True, "cwd": cwd, "binding": binding, "configPath": str(config_path())})
 
 
 def read_payload(path: str) -> dict[str, Any]:
@@ -593,6 +842,7 @@ def cmd_review_story(args: argparse.Namespace) -> None:
 
 def cmd_create_execution(args: argparse.Namespace) -> None:
     cfg = load_config()
+    info = require_git_cwd(args.cwd)
     payload = read_payload(args.payload)
     project_id = payload.get("project") or payload.get("projectId")
     if project_id is None:
@@ -621,10 +871,11 @@ def cmd_create_execution(args: argparse.Namespace) -> None:
     if execution_id is None:
         raise ZenTaoError(f"创建执行未返回 id: {result}")
 
-    cwd = resolve_cwd(args.cwd) if args.cwd else None
-    if cwd and cwd in cfg.get("repos", {}):
-        cfg["repos"][cwd]["executionId"] = int(execution_id)
-        cfg["repos"][cwd]["executionName"] = payload.get("name")
+    cwd = info["gitRoot"]
+    binding, binding_path, is_root = find_binding(cfg, cwd)
+    if binding and is_root and binding_path:
+        cfg["repos"][binding_path]["executionId"] = int(execution_id)
+        cfg["repos"][binding_path]["executionName"] = payload.get("name")
         save_config(cfg)
 
     emit(
@@ -643,6 +894,7 @@ def cmd_create_execution(args: argparse.Namespace) -> None:
 
 def cmd_create_story(args: argparse.Namespace) -> None:
     cfg = load_config()
+    info = require_git_cwd(args.cwd)
     payload = read_payload(args.payload)
     for key in ("title", "product", "pri", "category"):
         if key not in payload:
@@ -662,9 +914,10 @@ def cmd_create_story(args: argparse.Namespace) -> None:
     if story_id is None:
         raise ZenTaoError(f"创建需求未返回 id: {result}")
 
-    cwd = resolve_cwd(args.cwd) if args.cwd else None
-    if cwd and cwd in cfg.get("repos", {}):
-        cfg["repos"][cwd]["lastStoryId"] = int(story_id)
+    cwd = info["gitRoot"]
+    binding, binding_path, is_root = find_binding(cfg, cwd)
+    if binding and is_root and binding_path:
+        cfg["repos"][binding_path]["lastStoryId"] = int(story_id)
         save_config(cfg)
 
     emit(
@@ -690,6 +943,11 @@ def default_task_dates(estimate_hours: float | None) -> tuple[str, str]:
 def cmd_create_tasks(args: argparse.Namespace) -> None:
     cfg = load_config()
     payload = read_payload(args.payload)
+    info = require_git_cwd(args.cwd)
+    try:
+        assert_bound_root(cfg, info["gitRoot"])
+    except GuardError as exc:
+        raise_guard(exc)
     execution_id = payload.get("executionId") or payload.get("execution")
     tasks = payload.get("tasks")
     if execution_id is None:
@@ -697,7 +955,18 @@ def cmd_create_tasks(args: argparse.Namespace) -> None:
     if not isinstance(tasks, list) or not tasks:
         die("payload.tasks 必须是非空数组")
 
-    account = payload.get("assignedTo") or cfg.get("account")
+    policy = load_policy(cfg)
+    account = str(cfg.get("account") or "")
+    top_assignee = payload.get("assignedTo")
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        explicit = task.get("assignedTo") or top_assignee
+        try:
+            assert_assign_self(str(explicit) if explicit else None, account, policy)
+        except GuardError as exc:
+            raise_guard(exc)
+
     created = []
     errors = []
     for idx, task in enumerate(tasks):
@@ -708,7 +977,11 @@ def cmd_create_tasks(args: argparse.Namespace) -> None:
             errors.append({"index": idx, "error": "缺少 name 或 type"})
             continue
         body = dict(task)
-        body.setdefault("assignedTo", account)
+        explicit = task.get("assignedTo") or top_assignee
+        try:
+            body["assignedTo"] = assert_assign_self(str(explicit) if explicit else None, account, policy)
+        except GuardError as exc:
+            raise_guard(exc)
         body.setdefault("pri", 3)
         if "estimate" in body and body["estimate"] is not None:
             body["estimate"] = float(body["estimate"])
@@ -749,20 +1022,34 @@ def cmd_create_tasks(args: argparse.Namespace) -> None:
 
 
 def cmd_update_status(args: argparse.Namespace) -> None:
+    if args.type == "story" and (args.name or args.estimate is not None):
+        die("需求的 update-status 只接受 status 和 stage，不接受标题、描述、验收、工时。")
+
     cfg = load_config()
     entity = args.type
     entity_id = int(args.id)
     status = args.status
     if entity == "story":
         path = f"/api.php/v1/stories/{entity_id}"
+        body: dict[str, Any] = {"status": status}
+        if args.stage:
+            body["stage"] = args.stage
     elif entity == "task":
+        info = require_git_cwd(args.cwd)
+        try:
+            assert_bound_root(cfg, info["gitRoot"])
+            task = fetch_task(cfg, entity_id)
+            assert_task_owner(task, str(cfg.get("account") or ""), load_policy(cfg))
+        except GuardError as exc:
+            raise_guard(exc)
         path = f"/api.php/v1/tasks/{entity_id}"
+        body = {"status": status}
+        if args.name:
+            body["name"] = args.name
+        if args.estimate is not None:
+            body["estimate"] = float(args.estimate)
     else:
         die("type 只能是 story 或 task")
-
-    body: dict[str, Any] = {"status": status}
-    if args.stage:
-        body["stage"] = args.stage
 
     # 不同版本可能是 PUT 或 POST；先 PUT，失败再尝试常见变更接口
     try:
@@ -818,6 +1105,43 @@ def cmd_link_story_execution(args: argparse.Namespace) -> None:
     raise SystemExit(3)
 
 
+def cmd_show_policy(_: argparse.Namespace) -> None:
+    cfg = load_config()
+    emit({"ok": True, "policy": load_policy(cfg)})
+
+
+def cmd_inspect_repo(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    info = require_git_cwd(args.cwd)
+    binding, binding_path, is_root = find_binding(cfg, info["gitRoot"])
+    result: dict[str, Any] = {
+        "ok": True,
+        "gitRoot": info["gitRoot"],
+        "remote": info["remote"],
+        "branch": info["branch"],
+        "bound": binding is not None and is_root,
+        "binding": binding if binding is not None and is_root else None,
+        "bindingPath": binding_path,
+        "bindingPathIsGitRoot": is_root if binding_path else None,
+    }
+    messages: list[str] = []
+    if binding_path and not is_root:
+        messages.append("绑定路径不是 git 根目录，请重新绑定。不会自动改写配置。")
+    if info["remote"] is None:
+        messages.append("无 origin。确认这条路径之前不要写入。")
+    if messages:
+        result["message"] = " ".join(messages)
+    emit(result)
+
+
+def cmd_list_tasks(args: argparse.Namespace) -> None:
+    cfg = load_config()
+    policy = load_policy(cfg)
+    tasks = fetch_execution_tasks(cfg, int(args.execution))
+    visible = visible_tasks(tasks, str(cfg.get("account") or ""), policy)
+    emit({"ok": True, "executionId": int(args.execution), "count": len(visible), "tasks": visible})
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="禅道 REST CLI（zentao-dev-workflow）")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -838,6 +1162,17 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("list-executions", help="列出项目下执行/迭代")
     p.add_argument("--project", type=int, required=True)
     p.set_defaults(func=cmd_list_executions)
+
+    p = sub.add_parser("show-policy", help="打印合并默认值后的 policy")
+    p.set_defaults(func=cmd_show_policy)
+
+    p = sub.add_parser("inspect-repo", help="查看 git 根目录、远程和绑定")
+    p.add_argument("--cwd", required=True)
+    p.set_defaults(func=cmd_inspect_repo)
+
+    p = sub.add_parser("list-tasks", help="列出执行下任务，供去重和区分创建人")
+    p.add_argument("--execution", type=int, required=True)
+    p.set_defaults(func=cmd_list_tasks)
 
     p = sub.add_parser("show-repo", help="查看当前仓库绑定")
     p.add_argument("--cwd", default=None)
@@ -880,6 +1215,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("create-tasks", help="在执行下批量创建任务")
     p.add_argument("--payload", required=True)
+    p.add_argument("--cwd", default=None, help="必须是已绑定的 git 根目录")
     p.set_defaults(func=cmd_create_tasks)
 
     p = sub.add_parser("update-status", help="更新需求或任务状态")
@@ -887,6 +1223,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--id", required=True)
     p.add_argument("--status", required=True)
     p.add_argument("--stage", default=None, help="可选，需求阶段如 developing/developed")
+    p.add_argument("--name", default=None, help="仅任务：修改标题")
+    p.add_argument("--estimate", type=float, default=None, help="仅任务：修改预计工时")
+    p.add_argument("--cwd", default=None, help="任务更新时必须是已绑定的 git 根目录")
     p.set_defaults(func=cmd_update_status)
 
     p = sub.add_parser("link-story-execution", help="尝试将需求关联到执行")

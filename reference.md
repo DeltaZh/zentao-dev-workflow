@@ -107,7 +107,9 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 `status` 常见值：`draft` | `active` | `closed` | `changed` | `reviewing`  
 `stage` 常见值：`wait` | `planned` | `projected` | `developing` | `developed` | `testing` | `tested` | `verified` | `released` | `closed`
 
-创建需求时 CLI 默认补 `assignedTo` / `reviewer` 为配置账号。创建后务必先评审激活，再关联迭代与建任务。
+创建需求时 CLI 默认补 `assignedTo` / `reviewer` 为配置账号。新建**任务**是否允许指派给别人，由 `policy.assignToSelf` 决定，默认只指派给当前账号。创建后务必先评审激活，再关联迭代与建任务。
+
+「自己的任务」只认 `openedBy`（账号字符串，或带 `account` 的对象）。修改任务前 CLI 会拒绝 `openedBy` 不是当前账号的任务。解析不出创建人时只读。
 
 ## 创建任务 payload 示例
 
@@ -132,7 +134,27 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 `type` 常见值：`design` | `devel` | `request` | `test` | `study` | `discuss` | `ui` | `affair` | `misc`  
 任务 `status`：`wait` | `doing` | `done` | `closed` | `cancel`
 
-未传 `estStarted` / `deadline` 时，CLI 按今天与预计工时自动补日期。
+未传 `estStarted` / `deadline` 时，CLI 按今天与预计工时自动补日期。CLI 不改写 `estimate`，也不设最低工时。
+
+`create-tasks` 与任务 `update-status` 必须带 `--cwd`，且该路径必须是已绑定的 git 根目录。任务 `update-status` 可选 `--name`、`--estimate`。需求 `update-status` 不接受这两项。
+
+## policy
+
+本机 `~/.config/zentao/config.json` 的 `policy` 可覆盖默认口径。缺字段时 CLI 用技能默认补上，`show-policy` 的 `defaultsUsed` 标出来源。`defaults.hourBias` 与 `defaults.assignToSelf` 不再生效。
+
+| 键 | 默认 |
+|---|---|
+| `hourMethod` | `senior_by_volume_and_difficulty` |
+| `titleStyle` | `verb_result` |
+| `titleStyleNote` | 空字符串 |
+| `allowReadOthersTasks` | `true` |
+| `allowModifyOthersTasks` | `false` |
+| `requirePreview` | `true` |
+| `previewSurface` | `canvas` |
+| `repoLock` | `session_git_root` |
+| `assignToSelf` | `true` |
+
+相关命令：`show-policy`、`inspect-repo --cwd`、`list-tasks --execution`。`inspect-repo` 返回 git 根目录、`origin`、分支，以及绑定路径是不是 git 根目录。无 `origin` 时 `message` 会说明确认路径前不要写入。
 
 ## 状态映射（配置 statusMap）
 
