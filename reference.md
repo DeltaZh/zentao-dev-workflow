@@ -160,8 +160,21 @@ Skill 主流程见 [SKILL.md](SKILL.md)。本文件供实现细节查阅。
 
 ## 接口坑
 
-- 任务的实际开始、完成时间用 PUT `/tasks/{id}` 会静默忽略：不报错，值也不变。`update-status` 在 `doing` 时改走 `POST /tasks/{id}/start`，在 `done` 时先 start 再 `POST /tasks/{id}/finish`。
-- 这两个动作接口把无时区字符串按服务器本地时间解释，再存成 UTC。`2026-10-05T09:30:00` 在东八区服务器上存成 `2026-10-05T01:30:00Z`。带 `Z` 会被再减 8 小时。CLI 按 `serverUtcOffsetHours` 生成无时区时间。
+二次开发手册（改任务前先对照，不要在正式任务上试）：
+
+| 动作 | 方法 | 路径 | 手册 |
+|---|---|---|---|
+| 修改任务 | PUT | `/api.php/v1/tasks/{id}` | [修改任务](https://www.zentao.net/book/api/718.html) |
+| 启动任务 | POST | `/api.php/v1/tasks/{id}/start` | [开始任务](https://www.zentao.net/book/api/967.html) |
+| 完成任务 | POST | `/api.php/v1/tasks/{id}/finish` | [完成任务](https://www.zentao.net/book/api/970.html) |
+
+- 「修改任务」的请求体只有名称、指派、预计开始、截止日期、预计工时等。`realStarted`、`finishedDate`、`finishedBy` 不在请求体里。PUT 这三个字段不报错，值也不变。
+- 实际开始、实际完成、由谁完成走「完成任务」。`finishedBy` 不能当请求字段写，服务端记成当前登录账号。已完成的任务可以再调 finish 补日期，不必取消或重建。
+- `currentConsumed` 是本次追加的消耗，会加进 `consumed`。日期已经有消耗、只补实际时间时传 `0`。再传一遍总工时，消耗会翻倍。`consumed` 不能改小，报「总计消耗必须大于之前消耗」就停。
+- 未开始的任务用 start 写 `realStarted`（还要 `left`）。已经开始或已完成的再 start，会报已经启动。这种任务只调 finish。
+- start / finish 把无时区字符串当服务器本地时间，再存成 UTC。`2026-07-13 09:00:00` 在东八区存成 `2026-07-13T01:00:00Z`，界面仍是 7 月 13 日 09:00。带 `Z` 会再减 8 小时，日期掉到前一天。补历史任务时实际开始用预计日 `09:00:00`。实际完成从这天 09:00 起按消耗工时推（每天 8 小时，周日跳过）；可以晚几个小时或再延后，不要改成预计结束当天的固定钟点。
+- CLI `update-status` 的实际时间是「当前时刻往前推预计工时」，不是任务上的预计起止。补历史日期不要走这个命令。
+- `GET /api.php/v1/tasks` 会忽略 `page` / `limit`。对账改为列出项目执行（`status` 要含 `closed`，否则已关闭迭代里的任务会漏），再拉每个执行的任务。
 - 迭代的 `days`、`status` 可以 PUT。`realBegan`、`realEnd` 同样会被静默忽略；关闭时服务端用自己的时钟写 `closedDate`，可能和本机差一天。创建迭代时若 payload 带了这两个字段，CLI 会丢掉并在结果里给出 `ignoredFields`。
 - token 过期时常见表现是登录页 HTML 且 HTTP 200，不是 401。CLI 遇到非 JSON、401、502、503、504 会清 token、重新登录，并按 `authBackoffSeconds` 退避重试。批量创建任务时，相邻写入间隔 `writeIntervalSeconds`。
 

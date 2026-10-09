@@ -1,6 +1,6 @@
 ---
 name: zentao-dev-workflow
-description: 通过禅道 REST API 按固定顺序新建产品/项目、创建并评审需求、创建迭代、关联需求、创建并完成开发任务。在用户提到禅道、新建产品、新建项目、创建需求、评审需求、建迭代、开发任务、收工补任务/工时、绑定产品项目，或要求把某次改动同步到禅道时使用。也在工时偏短、写入前要预览、误改他人任务、窜到其他 git 仓库时使用。
+description: 通过禅道 REST API 按固定顺序新建产品/项目、创建并评审需求、创建迭代、关联需求、创建并完成开发任务。在用户提到禅道、新建产品、新建项目、创建需求、评审需求、建迭代、开发任务、收工补任务/工时、绑定产品项目，或要求把某次改动同步到禅道时使用。也在工时偏短、写入前要预览、误改他人任务、窜到其他 git 仓库、补历史任务的实际开始/实际完成/由谁完成时使用。
 ---
 
 # 禅道开发工作流
@@ -192,7 +192,7 @@ python3 "$SKILL/scripts/zentao.py" link-story-execution --story <id> --execution
 # 建任务
 python3 "$SKILL/scripts/zentao.py" create-tasks --payload /tmp/zentao-tasks.json --cwd "<git 根目录>"
 
-# 完成自己的任务：doing/done 走 start、finish，不 PUT 实际时间
+# 完成自己的任务。补历史日期不要用这条：它按「现在往前推工时」写实际时间
 python3 "$SKILL/scripts/zentao.py" update-status --type task --id <id> --status done --cwd "<git 根目录>"
 ```
 
@@ -203,6 +203,35 @@ python3 "$SKILL/scripts/zentao.py" update-status --type story --id <id> --status
 ```
 
 任务 payload 形状见 [reference.md](reference.md)。部分失败时报告已成功 ID，只重试失败项；**不要**为了重试而去改已评审需求的正文。
+
+## 补历史任务（实际开始 / 实际完成 / 工时）
+
+补已经做过的任务时，预计日期和实际日期是两套字段。只写 `estStarted` / `deadline`，界面按「实际开始」筛选会少掉这些任务。标完成前先读禅道二次开发手册里的「完成任务」「启动任务」，不要靠试正式任务摸接口。
+
+每条要补的任务必须同时有：
+
+| 字段 | 写什么 |
+|---|---|
+| `estStarted` | 预计开始，保持已有日期，不要按工时改短 |
+| `deadline` | 预计结束，保持已有日期 |
+| `realStarted` | 实际开始 = 预计开始当天 `09:00:00`，日期与预计开始同一天 |
+| `finishedDate` | 按消耗工时从实际开始往后推，不必等于预计结束 |
+| `finishedBy` | 由谁完成 = 当前账号。完成接口用当前账号调用，服务端把完成人写成调用者 |
+| `consumed` | 消耗必须大于 0 |
+
+工时：1 个工作日 = 8 小时，从 09:00 起算，周日休息，周六算工作日。实际完成从实际开始按消耗往后推：当天 09:00 起算 8 小时到 17:00，超过 8 小时顺延到下一工作日 09:00 继续。不必卡在预计结束那天，晚几个小时或再延后一段都可以。新建或消耗仍为 0 时，用预计起止之间的工作日数 × 8。已有消耗不要重算，也不要为了让实际完成等于预计结束去改日期。
+
+只改 `openedBy` 等于当前账号的任务。别人创建的，即使指派给自己、或标题像自己的工作，也只读。创建人解析不出就跳过。禁止先改派再写。条数对不上时，先按创建人拆开，不要把别人的差额当成自己漏补。
+
+写入：
+
+- 已是 `done`、只缺实际时间：直接 `POST /api.php/v1/tasks/{id}/finish`。不要 `start`，不要取消、关闭或重建。
+- 请求体带 `assignedTo`（当前账号）、`realStarted`、`finishedDate`。消耗已经有了就传 `currentConsumed: 0`。`currentConsumed` 是本次追加，再传一遍总工时会翻倍。
+- `consumed` 只能增不能减。接口报「总计消耗必须大于之前消耗」时停，不要换一条正式任务继续试。
+- 时间用无时区本地时间 `YYYY-MM-DD HH:MM:SS`，不要带 `Z`。带 `Z` 会再减 8 小时，日期会掉到前一天，按实际开始筛选就会少一条。
+- CLI 的 `update-status` 用「当前时间往前推工时」生成实际起止，补历史日期时不要用它。
+
+对账按项目执行拉任务，状态要含 `closed`，默认列表没有已关闭迭代。不要用 `GET /api.php/v1/tasks` 做全量统计，它的 `page` / `limit` 不可靠。补完后分别数：预计开始落在区间里的条数、实际开始落在同一区间里的条数，只计当前账号创建的。
 
 ## 确认摘要模板
 
@@ -261,7 +290,7 @@ stdout 为 JSON；错误在 stderr，非零退出。
 - `--cwd` 不是 git 根目录：使用 stderr 里的 `gitRoot` 问用户，不要改到另一个仓库
 - 仓库未绑定，或绑定路径不是 git 根目录：先绑定或请用户重新绑定，不要自动改配置
 - `openedBy` 不是当前账号，或创建人解析不出：跳过该任务，不要改派后再写
-- 任务实际开始/完成时间不要用 PUT。`doing` 走 `POST /tasks/{id}/start`，`done` 先 start 再 `POST /tasks/{id}/finish`。时间是无时区的服务器本地时间 `YYYY-MM-DDTHH:MM:SS`，不要带 `Z`。时区用 `policy.serverUtcOffsetHours`，默认 8
+- 任务实际开始/完成时间不要用 PUT `/tasks/{id}`，该接口会静默丢掉 `realStarted`、`finishedDate`、`finishedBy`。未开始的任务用 `POST /tasks/{id}/start` 写实际开始；完成一律用 `POST /tasks/{id}/finish` 写实际开始和实际完成。已经 `done` 的只调 finish，不要再 start。补历史任务的日期规则见上一节，不要用 `update-status` 的「现在往前推工时」
 - 迭代的 `days` / `status` 可以 PUT。`realBegan` / `realEnd` 会被静默忽略，不要当成写成功。关闭时 `closedDate` 由服务器时钟填写，可能和本机差一天
 - 响应不是 JSON（常见是登录页 HTML 且 HTTP 200）或 502：清 token 再取，按 `authBackoffSeconds` 退避重试，次数见 `authRetries`。批量写任务之间停 `writeIntervalSeconds`（默认 0.35 秒）
 - 批量建任务部分失败：只报告已成功的 id，只重试失败项；内容有变化则重新预览
